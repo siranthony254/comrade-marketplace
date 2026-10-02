@@ -113,6 +113,13 @@ enum DisputeStatus {
   RESOLVED_SELLER
 }
 
+enum PostType {
+  STOCK_UPDATE    // Seller announcing stock changes
+  NEED_ITEM       // Buyer looking for something
+  GENERAL         // General post
+  PROMO           // Promotional post
+}
+
 // ─── USERS ────────────────────────────────────────────────────
 
 model User {
@@ -184,6 +191,11 @@ model StudentProfile {
   reviewsGiven Review[]
   disputes     Dispute[]
 
+  posts       Post[]
+  likes       Like[]
+  comments    Comment[]
+  shares      Share[]
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -225,6 +237,7 @@ model Business {
   products Product[]
   orders   Order[]
   reviews  Review[]
+  posts    Post[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -428,6 +441,82 @@ model Notification {
   createdAt DateTime  @default(now())
 
   @@index([userId, readAt, createdAt])
+}
+
+// ─── SOCIAL FEED ───────────────────────────────────────────────
+
+model Post {
+  id          String         @id @default(cuid())
+  authorId    String
+  author      StudentProfile @relation(fields: [authorId], references: [id], onDelete: Cascade)
+  businessId  String?        // Optional: link to seller's business
+  business    Business?      @relation(fields: [businessId], references: [id])
+
+  type        PostType       @default(GENERAL)
+  content     String         @db.Text
+  images      String[]       // Cloudinary URLs
+  linkUrl     String?        // Optional link to product page or external
+  linkTitle   String?        // Optional link preview title
+  linkDescription String?    // Optional link preview description
+  linkImage   String?        // Optional link preview image
+
+  likes       Like[]
+  comments    Comment[]
+  shares      Share[]
+
+  createdAt   DateTime       @default(now())
+  updatedAt   DateTime       @updatedAt
+
+  @@index([authorId, createdAt])
+  @@index([createdAt])
+  @@index([type])
+}
+
+model Like {
+  id        String         @id @default(cuid())
+  postId    String
+  post      Post           @relation(fields: [postId], references: [id], onDelete: Cascade)
+  userId    String
+  user      StudentProfile @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime       @default(now())
+
+  @@unique([postId, userId])
+  @@index([postId])
+  @@index([userId])
+}
+
+model Comment {
+  id        String         @id @default(cuid())
+  postId    String
+  post      Post           @relation(fields: [postId], references: [id], onDelete: Cascade)
+  authorId  String
+  author    StudentProfile @relation(fields: [authorId], references: [id], onDelete: Cascade)
+  content   String         @db.Text
+  parentId  String?        // For nested replies
+  parent    Comment?       @relation("CommentReplies", fields: [parentId], references: [id], onDelete: Cascade)
+  replies   Comment[]      @relation("CommentReplies")
+
+  createdAt DateTime       @default(now())
+  updatedAt DateTime       @updatedAt
+
+  @@index([postId, createdAt])
+  @@index([authorId])
+}
+
+model Share {
+  id          String         @id @default(cuid())
+  postId      String
+  post        Post           @relation(fields: [postId], references: [id], onDelete: Cascade)
+  sharedById  String
+  sharedBy    StudentProfile @relation(fields: [sharedById], references: [id], onDelete: Cascade)
+  shareUrl    String         // The unique shareable URL for this share
+
+  createdAt   DateTime       @default(now())
+
+  @@unique([shareUrl])
+  @@index([postId])
+  @@index([sharedById])
 }
 
 model AuditLog {

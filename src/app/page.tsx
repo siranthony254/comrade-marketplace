@@ -1,28 +1,22 @@
-// src/app/page.tsx — public homepage.
-// Phase 1 is students only, so supplier / hire-a-student are shown as "coming soon", not as dead links.
-
+// src/app/page.tsx — Homepage with social feed for logged-in users
 import Link from "next/link";
 import { ArrowRight, Shield, TrendingUp, Users, Store, Share2, Star, PackageCheck, BadgeCheck } from "lucide-react";
 import { getCurrentUser } from "@/lib/session";
+import { redirect } from "next/navigation";
+import CreatePost from "@/components/CreatePost";
+import PostFeed from "@/components/PostFeed";
+import { prisma } from "@/lib/prisma";
 
-export default async function HomePage() {
-  const user = await getCurrentUser();
-  const home = user ? (user.role === "ADMIN" ? "/admin" : "/post-login") : null;
-
+// Landing page component for non-logged-in users
+function LandingPage() {
   return (
     <main className="min-h-screen bg-background page-animate">
       <nav className="sticky top-0 z-50 bg-background/80 backdrop-blur border-b border-border">
         <div className="max-w-7xl mx-auto px-4 h-16 flex items-center justify-between">
           <Link href="/" className="font-display text-xl font-bold text-primary">Comrade<span className="text-secondary">Market</span></Link>
           <div className="flex items-center gap-3">
-            {home ? (
-              <Link href={home} className="text-sm font-semibold bg-primary text-primary-foreground px-4 py-2 rounded-lg hover:bg-primary/90">My dashboard</Link>
-            ) : (
-              <>
-                <Link href="/login" className="text-sm font-medium text-muted-foreground hover:text-foreground">Sign in</Link>
-                <Link href="/register" className="text-sm font-semibold bg-primary text-primary-foreground px-4 py-2 rounded-lg hover:bg-primary/90">Join free</Link>
-              </>
-            )}
+            <Link href="/login" className="text-sm font-medium text-muted-foreground hover:text-foreground">Sign in</Link>
+            <Link href="/register" className="text-sm font-semibold bg-primary text-primary-foreground px-4 py-2 rounded-lg hover:bg-primary/90">Join free</Link>
           </div>
         </div>
       </nav>
@@ -123,4 +117,66 @@ export default async function HomePage() {
       </footer>
     </main>
   );
+}
+
+// Feed page component for logged-in users
+async function FeedPage({ user }: { user: any }) {
+  // Fetch initial posts
+  const posts = await prisma.post.findMany({
+    where: {},
+    include: {
+      author: {
+        include: {
+          user: { select: { id: true, email: true } },
+          school: { select: { name: true, shortName: true } },
+          business: { select: { name: true, slug: true, logoUrl: true } },
+        },
+      },
+      business: { select: { name: true, slug: true, logoUrl: true } },
+      _count: {
+        select: {
+          likes: true,
+          comments: true,
+          shares: true,
+        },
+      },
+    },
+    orderBy: { createdAt: "desc" },
+    take: 20,
+  });
+
+  // Convert Date to string for client component
+  const serializedPosts = posts.map(post => ({
+    ...post,
+    createdAt: post.createdAt.toISOString(),
+  }));
+
+  return (
+    <div className="min-h-screen bg-background">
+      <nav className="sticky top-0 z-50 bg-background/80 backdrop-blur border-b border-border">
+        <div className="max-w-7xl mx-auto px-4 h-16 flex items-center justify-between">
+          <Link href="/" className="font-display text-xl font-bold text-primary">Comrade<span className="text-secondary">Market</span></Link>
+          <div className="flex items-center gap-3">
+            <Link href={user.role === "ADMIN" ? "/admin" : "/post-login"} className="text-sm font-semibold bg-primary text-primary-foreground px-4 py-2 rounded-lg hover:bg-primary/90">My dashboard</Link>
+          </div>
+        </div>
+      </nav>
+
+      <div className="max-w-2xl mx-auto py-6 px-4">
+        <h1 className="text-2xl font-bold mb-6">Campus Feed</h1>
+        <CreatePost />
+        <PostFeed posts={serializedPosts} currentUserId={user.id} />
+      </div>
+    </div>
+  );
+}
+
+export default async function HomePage() {
+  const user = await getCurrentUser();
+
+  if (!user) {
+    return <LandingPage />;
+  }
+
+  return <FeedPage user={user} />;
 }
