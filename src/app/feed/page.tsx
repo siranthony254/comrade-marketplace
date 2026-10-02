@@ -9,13 +9,15 @@ export default async function FeedPage() {
   const user = await getCurrentUser();
   if (!user) redirect("/login");
 
-  // Fetch initial posts
+  // Fetch initial posts. See src/app/page.tsx's FeedPage for why author.user is left out and
+  // relationLoadStrategy is set — same email-leak-via-RSC-payload fix, same slow-query fix.
   const posts = await prisma.post.findMany({
     where: {},
     include: {
       author: {
-        include: {
-          user: { select: { id: true, email: true } },
+        select: {
+          id: true,
+          fullName: true,
           school: { select: { name: true, shortName: true } },
           business: { select: { name: true, slug: true, logoUrl: true } },
         },
@@ -31,6 +33,7 @@ export default async function FeedPage() {
     },
     orderBy: { createdAt: "desc" },
     take: 20,
+    relationLoadStrategy: "join",
   });
 
   // Convert Date to string for client component

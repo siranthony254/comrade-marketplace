@@ -1,8 +1,7 @@
 // src/app/page.tsx — Homepage with social feed for logged-in users
 import Link from "next/link";
 import { ArrowRight, Shield, TrendingUp, Users, Store, Share2, Star, PackageCheck, BadgeCheck } from "lucide-react";
-import { getCurrentUser } from "@/lib/session";
-import { redirect } from "next/navigation";
+import { getCurrentUser, type CurrentUser } from "@/lib/session";
 import CreatePost from "@/components/CreatePost";
 import PostFeed from "@/components/PostFeed";
 import { prisma } from "@/lib/prisma";
@@ -120,14 +119,20 @@ function LandingPage() {
 }
 
 // Feed page component for logged-in users
-async function FeedPage({ user }: { user: any }) {
-  // Fetch initial posts
+async function FeedPage({ user }: { user: CurrentUser }) {
+  // Fetch initial posts. author.user (id + email) was included here before and never
+  // rendered by PostFeed — since this is a Server Component passing props to a Client
+  // Component, that email still ends up in the page's RSC payload sent to the browser, same
+  // leak as the API route had. Dropped for the same reason; relationLoadStrategy avoids the
+  // ~5-6 sequential round trips this nested include would otherwise cost (measured at 8-15s
+  // per request against this app's database without it).
   const posts = await prisma.post.findMany({
     where: {},
     include: {
       author: {
-        include: {
-          user: { select: { id: true, email: true } },
+        select: {
+          id: true,
+          fullName: true,
           school: { select: { name: true, shortName: true } },
           business: { select: { name: true, slug: true, logoUrl: true } },
         },
@@ -143,6 +148,7 @@ async function FeedPage({ user }: { user: any }) {
     },
     orderBy: { createdAt: "desc" },
     take: 20,
+    relationLoadStrategy: "join",
   });
 
   // Convert Date to string for client component

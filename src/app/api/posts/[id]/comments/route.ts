@@ -1,7 +1,8 @@
 // src/app/api/posts/[id]/comments/route.ts
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
-import { apiActiveStudent } from "@/lib/session";
+import { apiActiveStudent, apiUser } from "@/lib/session";
+import { ApiError } from "@/lib/api";
 import { z } from "zod";
 
 const createCommentSchema = z.object({
@@ -9,40 +10,48 @@ const createCommentSchema = z.object({
   parentId: z.string().optional(),
 });
 
-// GET /api/posts/[id]/comments - Get comments for a post
-export async function GET(req: NextRequest, { params }: { params: { id: string } }) {
+// Same fix as the posts routes: no auth check, plus author.user.email included and never
+// rendered (the frontend only shows fullName) — dropped for the same reasons.
+const COMMENT_AUTHOR_SELECT = {
+  select: {
+    id: true,
+    fullName: true,
+    school: { select: { name: true, shortName: true } },
+  },
+} as const;
+
+function errorResponse(error: unknown, fallback: string) {
+  if (error instanceof ApiError) return NextResponse.json({ error: error.message }, { status: error.status });
+  console.error(fallback, error);
+  return NextResponse.json({ error: fallback }, { status: 500 });
+}
+
+// GET /api/posts/[id]/comments - Get comments for a post. Requires sign-in.
+export async function GET(_req: NextRequest, { params }: { params: { id: string } }) {
   try {
+    await apiUser();
+
     const comments = await prisma.comment.findMany({
       where: {
         postId: params.id,
         parentId: null, // Only top-level comments
       },
       include: {
-        author: {
-          include: {
-            user: { select: { id: true, email: true } },
-            school: { select: { name: true, shortName: true } },
-          },
-        },
+        author: COMMENT_AUTHOR_SELECT,
         replies: {
-          include: {
-            author: {
-              include: {
-                user: { select: { id: true, email: true } },
-                school: { select: { name: true, shortName: true } },
-              },
-            },
-          },
+          take: 20,
+          include: { author: COMMENT_AUTHOR_SELECT },
           orderBy: { createdAt: "asc" },
         },
       },
       orderBy: { createdAt: "desc" },
+      take: 50,
+      relationLoadStrategy: "join",
     });
 
     return NextResponse.json({ comments });
   } catch (error) {
-    console.error("[GET /api/posts/[id]/comments]", error);
-    return NextResponse.json({ error: "Failed to fetch comments" }, { status: 500 });
+    return errorResponse(error, "Failed to fetch comments");
   }
 }
 
@@ -56,6 +65,7 @@ export async function POST(req: NextRequest, { params }: { params: { id: string 
 
     const post = await prisma.post.findUnique({
       where: { id: params.id },
+      select: { id: true },
     });
 
     if (!post) {
@@ -66,6 +76,7 @@ export async function POST(req: NextRequest, { params }: { params: { id: string 
     if (validated.parentId) {
       const parentComment = await prisma.comment.findUnique({
         where: { id: validated.parentId },
+        select: { postId: true },
       });
       if (!parentComment || parentComment.postId !== params.id) {
         return NextResponse.json({ error: "Invalid parent comment" }, { status: 400 });
@@ -79,14 +90,7 @@ export async function POST(req: NextRequest, { params }: { params: { id: string 
         content: validated.content,
         parentId: validated.parentId,
       },
-      include: {
-        author: {
-          include: {
-            user: { select: { id: true, email: true } },
-            school: { select: { name: true, shortName: true } },
-          },
-        },
-      },
+      include: { author: COMMENT_AUTHOR_SELECT },
     });
 
     return NextResponse.json({ comment }, { status: 201 });
@@ -94,7 +98,6 @@ export async function POST(req: NextRequest, { params }: { params: { id: string 
     if (error instanceof z.ZodError) {
       return NextResponse.json({ error: error.errors[0].message }, { status: 400 });
     }
-    console.error("[POST /api/posts/[id]/comments]", error);
-    return NextResponse.json({ error: "Failed to create comment" }, { status: 500 });
+    return errorResponse(error, "Failed to create comment");
   }
 }

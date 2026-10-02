@@ -9,7 +9,12 @@
 // ─────────────────────────────────────────────────────────────
 
 generator client {
-  provider = "prisma-client-js"
+  provider        = "prisma-client-js"
+  // Lets a query request relationLoadStrategy: "join" — one SQL query with LEFT JOINs
+  // instead of Prisma's default of one round trip per relation. Used by the posts/feed
+  // queries, which nest several relations and were measured taking 8-15s per request
+  // against this app's database otherwise (each round trip costs real time here).
+  previewFeatures = ["relationJoins"]
 }
 
 datasource db {
