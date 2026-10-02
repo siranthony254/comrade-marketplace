@@ -46,10 +46,23 @@ enum ProductType {
 }
 
 /// ESCROW: buyer pays the platform's payment provider up front, released on receipt.
-/// ON_DELIVERY: buyer pays the seller directly (cash / own M-Pesa). No fee, no protection.
+/// ON_DELIVERY: buyer pays the seller cash, in person. No fee, no protection.
+/// DIRECT_TRANSFER: buyer sends M-Pesa straight to the seller's own till/paybill/phone,
+///   outside the platform entirely. No fee (the platform never touches the money), and
+///   — unlike ESCROW — the platform has NO way to force a refund if something goes wrong.
+///   This exists as a stand-in for ESCROW until a payment provider is integrated: it's the
+///   only way to offer SOME accountability (a traceable M-Pesa transaction, a confirmation
+///   handshake, dispute mediation) for services/bigger orders in the meantime.
 enum PaymentMode {
   ESCROW
   ON_DELIVERY
+  DIRECT_TRANSFER
+}
+
+enum MpesaMethod {
+  TILL
+  PAYBILL
+  PHONE
 }
 
 enum DeliveryMethod {
@@ -109,6 +122,7 @@ model User {
   passwordHash     String
   role             UserRole      @default(STUDENT)
   status           AccountStatus @default(PENDING_REVIEW)
+  phoneVerifiedAt  DateTime? // set via self-service OTP, any time after signup — never required to register
   failedLoginCount Int           @default(0)
   lockedUntil      DateTime?
   createdAt        DateTime      @default(now())
@@ -199,6 +213,12 @@ model Business {
   acceptsDelivery Boolean  @default(false)
   deliveryAreas   String[]
 
+  // Where buyers send money directly (DIRECT_TRANSFER orders). Null until the seller sets
+  // it up — until then their storefront can only offer ON_DELIVERY (and ESCROW, once live).
+  mpesaMethod  MpesaMethod?
+  mpesaNumber  String? // the till number, paybill number, or phone — whichever mpesaMethod says
+  mpesaAccount String? // paybill account/reference, only used when mpesaMethod = PAYBILL
+
   isOpen   Boolean @default(true) // seller toggles: "I'm taking orders"
   isActive Boolean @default(true) // admin toggles: visible on the platform
 
@@ -262,7 +282,14 @@ model Order {
   deliveryMethod  DeliveryMethod
   deliveryAddress String?
   buyerNote       String?
-  buyerPhone      String // M-Pesa number for the STK push
+  buyerPhone      String // M-Pesa number for the STK push (ESCROW) or just a contact number otherwise
+
+  // DIRECT_TRANSFER payment handshake — a confirmation trail, not a money-safety guarantee.
+  // The seller must set sellerConfirmedPaidAt before CONFIRM is allowed (see applyOrderAction).
+  buyerMarkedPaidAt     DateTime?
+  buyerPaymentRef       String? // buyer-typed M-Pesa confirmation code, e.g. "QFT5X7YABC" — not verified against Safaricom
+  buyerPaymentProofKey  String? // optional screenshot of the M-Pesa SMS, PRIVATE storage key
+  sellerConfirmedPaidAt DateTime?
 
   placedAt      DateTime?
   confirmedAt   DateTime?

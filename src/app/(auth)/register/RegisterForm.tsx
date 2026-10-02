@@ -1,17 +1,19 @@
 "use client";
 
-// 4 steps: mode -> details + phone code -> ID photos -> password.
+// 4 steps: mode -> details -> ID photos -> password.
 // Verification is done by a human admin after signup. Nothing here decides "verified".
+// No phone code at signup — that would make joining depend on an SMS provider being set up.
+// Phone ownership can be verified afterwards, any time, at /account/phone.
 // Photos use the phone's native camera via <input capture>, which is far more reliable on cheap
 // Android phones than in-page getUserMedia.
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import { signIn } from "next-auth/react";
 import { Camera, CheckCircle, ChevronRight, CreditCard } from "lucide-react";
 import { api, errorMessage } from "@/lib/client-api";
-import { btnPrimary, btnSecondary, inputCls, labelCls } from "@/lib/ui";
+import { btnPrimary, inputCls, labelCls } from "@/lib/ui";
 import { cn } from "@/lib/utils";
 
 type School = { id: string; name: string; type: string };
@@ -21,40 +23,16 @@ export function RegisterForm({ schools }: { schools: School[] }) {
   const router = useRouter();
   const [step, setStep] = useState<Step>(1);
   const [wantsToSell, setWantsToSell] = useState(false);
-  const [f, setF] = useState({ fullName: "", email: "", phone: "", otp: "", schoolId: "", studentIdNumber: "", courseOfStudy: "", yearOfStudy: "", password: "", confirm: "" });
+  const [f, setF] = useState({ fullName: "", email: "", phone: "", schoolId: "", studentIdNumber: "", courseOfStudy: "", yearOfStudy: "", password: "", confirm: "" });
   const [idPhoto, setIdPhoto] = useState<File | null>(null);
   const [selfie, setSelfie] = useState<File | null>(null);
-  const [codeSent, setCodeSent] = useState(false);
-  const [devCode, setDevCode] = useState("");
-  const [cooldown, setCooldown] = useState(0);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
   const set = (k: keyof typeof f) => (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) => setF((p) => ({ ...p, [k]: e.target.value }));
 
-  useEffect(() => {
-    if (cooldown <= 0) return;
-    const t = setTimeout(() => setCooldown((c) => c - 1), 1000);
-    return () => clearTimeout(t);
-  }, [cooldown]);
-
   const idUrl = useMemo(() => (idPhoto ? URL.createObjectURL(idPhoto) : ""), [idPhoto]);
   const selfieUrl = useMemo(() => (selfie ? URL.createObjectURL(selfie) : ""), [selfie]);
-
-  async function sendCode() {
-    setError("");
-    setBusy(true);
-    try {
-      const r = await api<{ devCode?: string }>("/api/auth/otp/send", { json: { phone: f.phone } });
-      setCodeSent(true);
-      setCooldown(30);
-      setDevCode(r.devCode ?? "");
-    } catch (e) {
-      setError(errorMessage(e));
-    } finally {
-      setBusy(false);
-    }
-  }
 
   async function submit() {
     setError("");
@@ -78,7 +56,7 @@ export function RegisterForm({ schools }: { schools: School[] }) {
     }
   }
 
-  const detailsValid = f.fullName.trim().length >= 2 && /\S+@\S+\.\S+/.test(f.email) && f.phone && f.schoolId && f.studentIdNumber.trim().length >= 3 && /^\d{6}$/.test(f.otp);
+  const detailsValid = f.fullName.trim().length >= 2 && /\S+@\S+\.\S+/.test(f.email) && f.phone.trim().length >= 9 && f.schoolId && f.studentIdNumber.trim().length >= 3;
   const STEPS = ["Mode", "Details", "Student ID", "Password"];
 
   return (
@@ -123,21 +101,9 @@ export function RegisterForm({ schools }: { schools: School[] }) {
             <div><label className={labelCls}>Email</label><input type="email" value={f.email} onChange={set("email")} autoComplete="email" className={inputCls} placeholder="jane@gmail.com" /></div>
             <div>
               <label className={labelCls}>M-Pesa phone number</label>
-              <div className="flex gap-2">
-                <input type="tel" value={f.phone} onChange={(e) => { set("phone")(e); setCodeSent(false); }} autoComplete="tel" className={inputCls} placeholder="0712 345 678" />
-                <button type="button" onClick={sendCode} disabled={busy || cooldown > 0 || !f.phone} className={`${btnSecondary} shrink-0`}>
-                  {cooldown > 0 ? `${cooldown}s` : codeSent ? "Resend" : "Send code"}
-                </button>
-              </div>
-              <p className="text-xs text-muted-foreground mt-1">Your money is paid to this number, so we verify it with a code.</p>
+              <input type="tel" value={f.phone} onChange={set("phone")} autoComplete="tel" className={inputCls} placeholder="0712 345 678" />
+              <p className="text-xs text-muted-foreground mt-1">You can verify this number any time after joining, from your account settings.</p>
             </div>
-            {codeSent && (
-              <div>
-                <label className={labelCls}>6-digit code</label>
-                <input inputMode="numeric" maxLength={6} value={f.otp} onChange={set("otp")} autoComplete="one-time-code" className={inputCls} placeholder="123456" />
-                {devCode && <p className="text-xs mt-1 text-amber-700 bg-amber-50 border border-amber-200 rounded px-2 py-1">Dev mode (no SMS provider): your code is <strong>{devCode}</strong></p>}
-              </div>
-            )}
             <div>
               <label className={labelCls}>Your school</label>
               <select value={f.schoolId} onChange={set("schoolId")} className={inputCls}>

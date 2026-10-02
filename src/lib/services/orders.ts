@@ -17,7 +17,7 @@ import { ApiError } from "@/lib/api";
 import { PLATFORM } from "@/lib/constants/platform";
 import { allowedPaymentModes, calculateAmounts, generateOrderNumber } from "@/lib/money";
 import { nextStatus, type OrderAction } from "@/lib/order-state";
-import { getPaymentProvider } from "@/lib/payments";
+import { getPaymentProvider, isEscrowAvailable } from "@/lib/payments";
 import type { z } from "zod";
 import type { placeOrderSchema } from "@/lib/validations";
 
@@ -68,6 +68,9 @@ export async function placeOrder(buyer: { profileId: string; userId: string; ful
   if (input.deliveryMethod === "DELIVERY" && !business.acceptsDelivery) {
     throw new ApiError(400, `${business.name} doesn't deliver. Choose pickup.`);
   }
+  if (input.paymentMode === "DIRECT_TRANSFER" && !business.mpesaMethod) {
+    throw new ApiError(400, `${business.name} hasn't set up M-Pesa payments yet.`);
+  }
 
   // Merge duplicate lines so one product can't be listed twice to dodge a stock check.
   const wanted = new Map<string, number>();
@@ -85,10 +88,10 @@ export async function placeOrder(buyer: { profileId: string; userId: string; ful
   const subtotal = lines.reduce((s, l) => s + l.lineTotal, 0);
   const hasService = lines.some((l) => l.product.type === "SERVICE");
 
-  const rule = allowedPaymentModes(subtotal, hasService);
+  const rule = allowedPaymentModes(subtotal, hasService, isEscrowAvailable());
   if (!rule.allowed.includes(input.paymentMode)) throw new ApiError(400, rule.reason);
   const amounts = calculateAmounts(subtotal, input.paymentMode);
-  const isEscrow = input.paymentMode === "ESCROW";
+  const isEscrow = input.paymentMode === "ESCROW"; // the only mode with a payment-pending gate / STK push
 
   let order: OrderFull | null = null;
   for (let attempt = 0; attempt < 5 && !order; attempt++) {
@@ -144,12 +147,11 @@ export async function placeOrder(buyer: { profileId: string; userId: string; ful
 
   if (!isEscrow) {
     // Notified after commit, not inside the transaction above — see notifyAfter().
-    await notifyAfter(business.owner.userId, {
-      type: "ORDER",
-      title: "New order!",
-      body: `${buyer.fullName} ordered ${order.orderNumber} (KES ${order.total.toLocaleString()}) — pay on delivery.`,
-      link: "/seller/orders",
-    });
+    const body =
+      input.paymentMode === "DIRECT_TRANSFER"
+        ? `${buyer.fullName} placed ${order.orderNumber} (KES ${order.total.toLocaleString()}). Check your M-Pesa for their payment, then confirm receipt in Orders before accepting.`
+        : `${buyer.fullName} ordered ${order.orderNumber} (KES ${order.total.toLocaleString()}) — pay on delivery.`;
+    await notifyAfter(business.owner.userId, { type: "ORDER", title: "New order!", body, link: "/seller/orders" });
     return { order, payment: null as null | { ok: boolean; error?: string } };
   }
   const payment = await initiatePayment(order.id);
@@ -354,6 +356,13 @@ export async function applyOrderAction(
   const t = nextStatus(order.status, action, actor.kind);
   if (!t.ok) throw new ApiError(409, t.reason);
   if (action === "DISPUTE" && (!extra.reason || !extra.description)) throw new ApiError(400, "Tell us what went wrong so we can help.");
+  // DIRECT_TRANSFER has no automatic payment check — this is the one place that stands in for
+  // it: a seller can't accept the order until THEY say they've seen the money in their own
+  // M-Pesa (see confirmPaymentReceived). Doesn't apply to ESCROW (provider already confirmed
+  // payment before the order could reach PLACED) or ON_DELIVERY (nothing to confirm yet).
+  if (action === "CONFIRM" && order.paymentMode === "DIRECT_TRANSFER" && !order.sellerConfirmedPaidAt) {
+    throw new ApiError(409, "Confirm you've received the payment before accepting this order.");
+  }
 
   const now = new Date();
   const payoutIds: string[] = [];
@@ -447,6 +456,45 @@ async function notifyTransition(
     case "CANCEL": return by === "BUYER" ? toSeller("Order cancelled", `${n} was cancelled by the buyer.`) : toBuyer("Order cancelled", `${n} was cancelled.${order.escrowStatus === "HELD" ? " Your money is being refunded." : ""}`);
     case "DISPUTE": return toSeller("Buyer raised a problem", `${n} is now in dispute. An admin will review it.`);
   }
+}
+
+// ─── DIRECT_TRANSFER PAYMENT HANDSHAKE ───────────────────────────
+// No provider is involved here — this is a confirmation trail between buyer and seller, not a
+// money-safety guarantee. If either side lies, the only recourse is the admin dispute system
+// (reputational/mediated, not a forced refund — the platform never held this money).
+
+/** Buyer: "I've sent the money." Optional evidence (an M-Pesa reference code and/or a screenshot). */
+export async function markBuyerPaid(orderId: string, buyerProfileId: string, info: { reference?: string | null; proofKey?: string | null }) {
+  const res = await prisma.order.updateMany({
+    where: { id: orderId, buyerId: buyerProfileId, paymentMode: "DIRECT_TRANSFER", status: "PLACED", buyerMarkedPaidAt: null },
+    data: { buyerMarkedPaidAt: new Date(), buyerPaymentRef: info.reference || null, buyerPaymentProofKey: info.proofKey || null },
+  });
+  if (res.count !== 1) throw new ApiError(409, "This order isn't waiting for a payment confirmation.");
+
+  const order = await prisma.order.findUniqueOrThrow({ where: { id: orderId }, include: ORDER_INCLUDE });
+  await notifyAfter(order.business.owner.userId, {
+    type: "ORDER",
+    title: "Buyer says they've paid",
+    body: `${order.buyer.fullName} says they sent KES ${order.total.toLocaleString()} for ${order.orderNumber}${info.reference ? ` (ref: ${info.reference})` : ""}. Check your M-Pesa, then confirm in Orders.`,
+    link: "/seller/orders",
+  });
+}
+
+/** Seller: "I checked my M-Pesa — it's there." Unlocks CONFIRM (see the guard in applyOrderAction). */
+export async function confirmPaymentReceived(orderId: string, sellerProfileId: string) {
+  const order = await prisma.order.findFirst({ where: { id: orderId, business: { ownerId: sellerProfileId } }, include: ORDER_INCLUDE });
+  if (!order) throw new ApiError(404, "Order not found.");
+  if (order.paymentMode !== "DIRECT_TRANSFER") throw new ApiError(409, "This order isn't paid by direct transfer.");
+
+  const res = await prisma.order.updateMany({ where: { id: orderId, sellerConfirmedPaidAt: null }, data: { sellerConfirmedPaidAt: new Date() } });
+  if (res.count !== 1) throw new ApiError(409, "Already confirmed.");
+
+  await notifyAfter(order.buyer.userId, {
+    type: "ORDER",
+    title: "Payment confirmed",
+    body: `${order.business.name} confirmed they received your payment for ${order.orderNumber}.`,
+    link: "/buyer/orders",
+  });
 }
 
 // ─── DISPUTES ───────────────────────────────────────────────────

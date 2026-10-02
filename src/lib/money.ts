@@ -4,7 +4,7 @@
 
 import { PLATFORM } from "@/lib/constants/platform";
 
-export type PaymentMode = "ESCROW" | "ON_DELIVERY";
+export type PaymentMode = "ESCROW" | "ON_DELIVERY" | "DIRECT_TRANSFER";
 
 export function formatKes(amount: number): string {
   return `KES ${amount.toLocaleString("en-KE")}`;
@@ -33,20 +33,30 @@ export interface PaymentModeRule {
 
 /**
  * Which payment modes may an order use?
- *  - any SERVICE item       -> escrow only (this is the anti-scam case)
- *  - total >= 300           -> escrow only
- *  - total < 100            -> on-delivery only (escrow isn't worth its cost)
- *  - otherwise              -> buyer chooses
+ *
+ * DIRECT_TRANSFER (buyer pays the seller's own till/paybill/phone, outside the platform) has
+ * no fee and no size limit, so it's always allowed once the seller has configured one. ESCROW
+ * is only offered when `escrowAvailable` is true (a real payment provider is configured) — until
+ * then DIRECT_TRANSFER is the only "accountable" option for the cases that would otherwise
+ * require escrow:
+ *  - any SERVICE item -> needs some accountability (the anti-scam case) -> DIRECT_TRANSFER and/or ESCROW, never plain cash
+ *  - total >= 300      -> same reasoning, big enough to warrant a traceable payment
+ *  - total < 100       -> escrow fee would be pennies, not worth it -> cash or DIRECT_TRANSFER
+ *  - otherwise         -> buyer chooses among whatever's on offer
  */
-export function allowedPaymentModes(total: number, hasService: boolean): PaymentModeRule {
-  if (hasService) return { allowed: ["ESCROW"], reason: "Services are always protected by escrow." };
+export function allowedPaymentModes(total: number, hasService: boolean, escrowAvailable: boolean): PaymentModeRule {
+  const escrow: PaymentMode[] = escrowAvailable ? ["ESCROW"] : [];
+
+  if (hasService) {
+    return { allowed: [...escrow, "DIRECT_TRANSFER"], reason: "Services need a protected or at least traceable payment — never cash." };
+  }
   if (total >= PLATFORM.escrow.requiredAtOrAboveKes) {
-    return { allowed: ["ESCROW"], reason: "Orders of this size are protected by escrow." };
+    return { allowed: [...escrow, "DIRECT_TRANSFER"], reason: "Orders of this size need a protected or at least traceable payment." };
   }
   if (total < PLATFORM.escrow.unavailableBelowKes) {
-    return { allowed: ["ON_DELIVERY"], reason: "Small orders are paid directly to the seller on delivery." };
+    return { allowed: ["ON_DELIVERY", "DIRECT_TRANSFER"], reason: "Pay in cash, or send the seller M-Pesa directly." };
   }
-  return { allowed: ["ESCROW", "ON_DELIVERY"], reason: "Choose how you want to pay." };
+  return { allowed: [...escrow, "ON_DELIVERY", "DIRECT_TRANSFER"], reason: "Choose how you want to pay." };
 }
 
 /** e.g. CM-7K3P9Q — unambiguous alphabet (no 0/O/1/I) so it's safe to read out over a call. */

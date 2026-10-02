@@ -10,7 +10,7 @@ import { usePathname } from "next/navigation";
 import { signOut } from "next-auth/react";
 import {
   LayoutDashboard, Store, Package, ShoppingBag, Search, Shield, ClipboardList,
-  Wallet, Bell, Menu, X, LogOut, ArrowLeftRight, Clock,
+  Wallet, Bell, Menu, X, LogOut, ArrowLeftRight, Clock, Smartphone,
 } from "lucide-react";
 import { api } from "@/lib/client-api";
 import { cn, initials, timeAgo } from "@/lib/utils";
@@ -43,6 +43,7 @@ interface ShellUser {
   name: string;
   role: "STUDENT" | "ADMIN";
   status: "PENDING_REVIEW" | "ACTIVE" | "REJECTED" | "SUSPENDED";
+  phoneVerified: boolean;
 }
 
 interface Notif { id: string; title: string; body: string; link: string | null; readAt: string | null; createdAt: string }
@@ -110,6 +111,15 @@ export function DashboardShell({ user, children }: { user: ShellUser; children: 
   const [notifsOpen, setNotifsOpen] = useState(false);
   const [notifs, setNotifs] = useState<Notif[]>([]);
   const [unread, setUnread] = useState(0);
+  const [phoneBannerDismissed, setPhoneBannerDismissed] = useState(false);
+
+  useEffect(() => {
+    try { setPhoneBannerDismissed(localStorage.getItem("cm_dismissed_phone_banner") === "1"); } catch { /* per-viewer convenience only */ }
+  }, []);
+  function dismissPhoneBanner() {
+    setPhoneBannerDismissed(true);
+    try { localStorage.setItem("cm_dismissed_phone_banner", "1"); } catch { /* ignore */ }
+  }
 
   const loadNotifs = useCallback(async () => {
     try {
@@ -215,6 +225,15 @@ export function DashboardShell({ user, children }: { user: ShellUser; children: 
               <strong>We&apos;re checking your student ID</strong> (usually under 24 hours). You can look around now — buying, selling and listing
               switch on as soon as it&apos;s approved.
             </p>
+          </div>
+        )}
+
+        {user.role === "STUDENT" && !user.phoneVerified && !phoneBannerDismissed && (
+          <div className="bg-blue-50 border-b border-blue-200 px-4 md:px-6 py-2.5 flex items-center gap-3 text-sm text-blue-900">
+            <Smartphone className="w-4 h-4 shrink-0" />
+            <p className="flex-1">Verify your phone number — it&apos;s the one M-Pesa prompts and payouts use.</p>
+            <Link href="/account/phone" className="font-semibold shrink-0 hover:underline">Verify now</Link>
+            <button onClick={dismissPhoneBanner} aria-label="Dismiss" className="shrink-0 p-1 -m-1"><X className="w-3.5 h-3.5" /></button>
           </div>
         )}
 

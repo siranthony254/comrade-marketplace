@@ -11,13 +11,19 @@ import { BuyerOrderActions } from "./BuyerOrderActions";
 
 export const dynamic = "force-dynamic";
 
-export default async function BuyerOrdersPage({ searchParams }: { searchParams: { pay?: string; placed?: string } }) {
+export default async function BuyerOrdersPage({ searchParams }: { searchParams: { pay?: string; placed?: string; directPay?: string } }) {
   const { profile } = await requireStudent();
   const orders = await prisma.order.findMany({
     where: { buyerId: profile.id },
     orderBy: { createdAt: "desc" },
     take: 60,
-    include: { items: true, business: { select: { name: true, slug: true } }, review: { select: { id: true } }, dispute: { select: { status: true } }, payments: { orderBy: { createdAt: "desc" }, take: 1, select: { status: true, failReason: true } } },
+    include: {
+      items: true,
+      business: { select: { name: true, slug: true, mpesaMethod: true, mpesaNumber: true, mpesaAccount: true } },
+      review: { select: { id: true } },
+      dispute: { select: { status: true } },
+      payments: { orderBy: { createdAt: "desc" }, take: 1, select: { status: true, failReason: true } },
+    },
   });
   const devSimulation = process.env.NODE_ENV !== "production" && (process.env.PAYMENT_PROVIDER ?? "mock") === "mock";
 
@@ -44,7 +50,7 @@ export default async function BuyerOrdersPage({ searchParams }: { searchParams: 
           </div>
           <ul className="text-sm space-y-0.5">{o.items.map((i) => <li key={i.id} className="flex justify-between"><span>{i.quantity} × {i.nameSnapshot}</span><span>{formatKes(i.lineTotal)}</span></li>)}</ul>
           <div className="flex justify-between text-sm font-semibold border-t border-border pt-2">
-            <span>Total {o.paymentMode === "ESCROW" ? "· 🔒 escrow" : "· pay on delivery"}</span><span>{formatKes(o.total)}</span>
+            <span>Total {o.paymentMode === "ESCROW" ? "· 🔒 escrow" : o.paymentMode === "DIRECT_TRANSFER" ? "· direct M-Pesa" : "· pay on delivery"}</span><span>{formatKes(o.total)}</span>
           </div>
           {o.status === "CANCELLED" && o.cancelReason && <p className="text-xs text-muted-foreground">Reason: {o.cancelReason}</p>}
           {o.escrowStatus === "REFUNDED" && <p className="text-xs text-green-700">Your money is being refunded to your M-Pesa.</p>}
@@ -54,6 +60,7 @@ export default async function BuyerOrdersPage({ searchParams }: { searchParams: 
             orderId={o.id} status={o.status} paymentMode={o.paymentMode} hasReview={!!o.review}
             autoOpenPay={searchParams.pay === o.id} devSimulation={devSimulation}
             lastPayment={o.payments[0] ?? null} autoReleaseAt={o.autoReleaseAt?.toISOString() ?? null}
+            business={o.business} buyerMarkedPaidAt={!!o.buyerMarkedPaidAt} sellerConfirmedPaidAt={!!o.sellerConfirmedPaidAt}
           />
         </div>
       ))}

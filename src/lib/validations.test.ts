@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { isSlugAvailableShape, makeSlug, normalizeKenyanPhone, placeOrderSchema, safeRedirectPath } from "./validations";
+import { businessSchema, isSlugAvailableShape, makeSlug, normalizeKenyanPhone, placeOrderSchema, registerSchema, safeRedirectPath } from "./validations";
 
 describe("normalizeKenyanPhone", () => {
   it.each([
@@ -67,5 +67,43 @@ describe("placeOrderSchema", () => {
     const r = placeOrderSchema.parse({ ...base, total: 1, items: [{ productId: "p1", quantity: 1, price: 1 }] });
     expect(r).not.toHaveProperty("total");
     expect(r.items[0]).not.toHaveProperty("price");
+  });
+  it("accepts DIRECT_TRANSFER as a payment mode", () => {
+    expect(placeOrderSchema.safeParse({ ...base, paymentMode: "DIRECT_TRANSFER" }).success).toBe(true);
+  });
+});
+
+describe("registerSchema", () => {
+  const base = { fullName: "Jane Wanjiku", email: "jane@gmail.com", phone: "0712345678", schoolId: "s1", studentIdNumber: "SCT221-001", password: "password123", wantsToSell: "true" };
+  it("does not require (or even accept extra meaning from) an OTP field — registration has none", () => {
+    const r = registerSchema.parse(base);
+    expect(r).not.toHaveProperty("otp");
+  });
+  it("still enforces the real requirements", () => {
+    expect(registerSchema.safeParse({ ...base, password: "short" }).success).toBe(false);
+    expect(registerSchema.safeParse({ ...base, email: "not-an-email" }).success).toBe(false);
+    expect(registerSchema.safeParse({ ...base, phone: "0123" }).success).toBe(false);
+  });
+});
+
+describe("businessSchema mpesa details", () => {
+  const base = { name: "Jane's Kitchen", slug: "janes-kitchen", category: "Food & Beverages", acceptsDelivery: false, deliveryAreas: [], isOpen: true };
+  it("allows no mpesa setup at all", () => {
+    expect(businessSchema.safeParse(base).success).toBe(true);
+  });
+  it("requires a number once a method is chosen", () => {
+    expect(businessSchema.safeParse({ ...base, mpesaMethod: "TILL" }).success).toBe(false);
+  });
+  it("validates a till/paybill number looks numeric", () => {
+    expect(businessSchema.safeParse({ ...base, mpesaMethod: "TILL", mpesaNumber: "abcdef" }).success).toBe(false);
+    expect(businessSchema.safeParse({ ...base, mpesaMethod: "TILL", mpesaNumber: "123456" }).success).toBe(true);
+  });
+  it("normalises a phone-based mpesa number the same way as everywhere else", () => {
+    const r = businessSchema.parse({ ...base, mpesaMethod: "PHONE", mpesaNumber: "0712 345 678" });
+    expect(r.mpesaNumber).toBe("254712345678");
+  });
+  it("drops the paybill account when the method isn't PAYBILL", () => {
+    const r = businessSchema.parse({ ...base, mpesaMethod: "TILL", mpesaNumber: "123456", mpesaAccount: "should-be-dropped" });
+    expect(r.mpesaAccount).toBeNull();
   });
 });

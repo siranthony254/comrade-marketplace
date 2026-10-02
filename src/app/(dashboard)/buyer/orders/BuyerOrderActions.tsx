@@ -2,23 +2,35 @@
 
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
-import { Smartphone, Star } from "lucide-react";
+import { Clock, Smartphone, Star } from "lucide-react";
 import { api, errorMessage } from "@/lib/client-api";
 import { btnDanger, btnPrimary, btnSecondary, inputCls, labelCls } from "@/lib/ui";
 import { cn } from "@/lib/utils";
 
+interface MpesaInfo { name: string; mpesaMethod: "TILL" | "PAYBILL" | "PHONE" | null; mpesaNumber: string | null; mpesaAccount: string | null }
+
 interface Props {
   orderId: string;
   status: string;
-  paymentMode: "ESCROW" | "ON_DELIVERY";
+  paymentMode: "ESCROW" | "ON_DELIVERY" | "DIRECT_TRANSFER";
   hasReview: boolean;
   autoOpenPay: boolean;
   devSimulation: boolean;
   lastPayment: { status: string; failReason: string | null } | null;
   autoReleaseAt: string | null;
+  business: MpesaInfo;
+  buyerMarkedPaidAt: boolean;
+  sellerConfirmedPaidAt: boolean;
 }
 
-export function BuyerOrderActions({ orderId, status, paymentMode, hasReview, devSimulation, lastPayment, autoReleaseAt }: Props) {
+function mpesaLabel(b: MpesaInfo): string {
+  if (!b.mpesaMethod || !b.mpesaNumber) return "Ask the seller how to pay them.";
+  if (b.mpesaMethod === "TILL") return `Buy Goods, Till number ${b.mpesaNumber}`;
+  if (b.mpesaMethod === "PAYBILL") return `Pay Bill ${b.mpesaNumber}${b.mpesaAccount ? `, account ${b.mpesaAccount}` : ""}`;
+  return `Send to 0${b.mpesaNumber.slice(3)}`;
+}
+
+export function BuyerOrderActions({ orderId, status, paymentMode, hasReview, devSimulation, lastPayment, autoReleaseAt, business, buyerMarkedPaidAt, sellerConfirmedPaidAt }: Props) {
   const router = useRouter();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -26,6 +38,8 @@ export function BuyerOrderActions({ orderId, status, paymentMode, hasReview, dev
   const [dispute, setDispute] = useState<{ reason: string; description: string } | null>(null);
   const [rating, setRating] = useState(0);
   const [comment, setComment] = useState("");
+  const [reference, setReference] = useState("");
+  const [proof, setProof] = useState<File | null>(null);
 
   // While waiting for the M-Pesa PIN, ask the server every 4s. The server asks the payment
   // provider, so this works even if the webhook is delayed.
@@ -48,6 +62,16 @@ export function BuyerOrderActions({ orderId, status, paymentMode, hasReview, dev
   }
   const act = (action: string, extra: object = {}) => run(() => api(`/api/orders/${orderId}/action`, { json: { action, ...extra } }));
 
+  async function submitMarkPaid() {
+    if (!reference.trim() && !proof) return setError("Add the M-Pesa code, a screenshot, or both.");
+    await run(async () => {
+      const form = new FormData();
+      if (reference.trim()) form.append("reference", reference.trim());
+      if (proof) form.append("proof", proof);
+      await api(`/api/orders/${orderId}/mark-paid`, { form });
+    });
+  }
+
   if (status === "PENDING_PAYMENT") {
     return (
       <div className="rounded-xl bg-amber-50 border border-amber-200 p-4 space-y-3 text-sm text-amber-950">
@@ -67,9 +91,27 @@ export function BuyerOrderActions({ orderId, status, paymentMode, hasReview, dev
     );
   }
 
+  const needsDirectPay = paymentMode === "DIRECT_TRANSFER" && status === "PLACED";
+
   return (
     <div className="space-y-3">
-      {status === "PLACED" && <button disabled={busy} onClick={() => act("CANCEL", { reason: "Cancelled by buyer" })} className={btnDanger}>Cancel order</button>}
+      {needsDirectPay && !buyerMarkedPaidAt && (
+        <div className="rounded-xl bg-blue-50 border border-blue-200 p-4 space-y-3 text-sm text-blue-950">
+          <p className="flex items-start gap-2"><Smartphone className="w-5 h-5 shrink-0" /><span><strong>Pay {business.name} directly:</strong> {mpesaLabel(business)}.</span></p>
+          <p className="text-xs text-blue-900/80">⚠️ This goes straight to the seller — Comrade Market can&apos;t hold or retrieve this money. Keep your M-Pesa confirmation message in case there&apos;s ever a dispute.</p>
+          <div><label className={labelCls}>M-Pesa confirmation code (recommended)</label><input value={reference} onChange={(e) => setReference(e.target.value)} placeholder="e.g. QFT5X7YABC" className={inputCls} /></div>
+          <div><label className={labelCls}>Or attach a screenshot of the M-Pesa message</label><input type="file" accept="image/*" onChange={(e) => setProof(e.target.files?.[0] ?? null)} className="text-xs" /></div>
+          {error && <p role="alert" className="text-red-700">{error}</p>}
+          <button disabled={busy} onClick={submitMarkPaid} className={`${btnPrimary} w-full`}>I&apos;ve sent the payment</button>
+        </div>
+      )}
+
+      {needsDirectPay && buyerMarkedPaidAt && !sellerConfirmedPaidAt && (
+        <p className="flex items-center gap-2 text-sm text-amber-800 bg-amber-50 border border-amber-200 rounded-xl p-3"><Clock className="w-4 h-4 shrink-0" />Waiting for {business.name} to confirm they&apos;ve received your payment.</p>
+      )}
+
+      {status === "PLACED" && paymentMode !== "DIRECT_TRANSFER" && <button disabled={busy} onClick={() => act("CANCEL", { reason: "Cancelled by buyer" })} className={btnDanger}>Cancel order</button>}
+      {status === "PLACED" && paymentMode === "DIRECT_TRANSFER" && !buyerMarkedPaidAt && <button disabled={busy} onClick={() => act("CANCEL", { reason: "Cancelled by buyer" })} className={btnDanger}>Cancel order</button>}
 
       {(status === "READY" || status === "DELIVERED") && !dispute && (
         <div className="space-y-2">
@@ -88,7 +130,7 @@ export function BuyerOrderActions({ orderId, status, paymentMode, hasReview, dev
               <option value="">Choose…</option>{["Item not received", "Not as described", "Wrong item", "Poor quality", "Other"].map((r) => <option key={r}>{r}</option>)}
             </select></div>
           <div><label className={labelCls}>Tell us what happened</label><textarea rows={3} maxLength={1000} value={dispute.description} onChange={(e) => setDispute({ ...dispute, description: e.target.value })} className={inputCls} /></div>
-          <p className="text-xs text-muted-foreground">The seller won&apos;t be paid while we review this.</p>
+          <p className="text-xs text-muted-foreground">{paymentMode === "ESCROW" ? "The seller won't be paid while we review this." : "This payment went directly to the seller, so we can't freeze or refund it ourselves — but we'll help mediate."}</p>
           <div className="flex gap-2"><button onClick={() => setDispute(null)} className={`${btnSecondary} flex-1`}>Back</button><button disabled={busy || !dispute.reason || dispute.description.length < 10} onClick={() => act("DISPUTE", dispute)} className={`${btnDanger} flex-1`}>Submit</button></div>
         </div>
       )}
@@ -103,7 +145,7 @@ export function BuyerOrderActions({ orderId, status, paymentMode, hasReview, dev
           </>)}
         </div>
       )}
-      {error && <p role="alert" className="text-sm text-red-600">{error}</p>}
+      {error && !needsDirectPay && <p role="alert" className="text-sm text-red-600">{error}</p>}
     </div>
   );
 }

@@ -41,17 +41,23 @@ export function isSlugAvailableShape(slug: string): { ok: true } | { ok: false; 
 }
 
 // ── Registration ────────────────────────────────────────────────
+// No OTP here: we don't require Africa's Talking (or any SMS provider) to let someone sign up.
+// Phone ownership is instead verified afterwards, any time, at /account/phone — self-service,
+// and not a gate on using the platform (see otpConfirmSchema below).
 export const registerSchema = z.object({
   fullName: z.string().trim().min(2).max(80),
   email: z.string().trim().toLowerCase().email().max(120),
   phone: phoneSchema,
-  otp: z.string().regex(/^\d{6}$/, "Enter the 6-digit code we sent you"),
   schoolId: z.string().min(1),
   studentIdNumber: z.string().trim().min(3).max(40),
   courseOfStudy: z.string().trim().max(80).optional().or(z.literal("").transform(() => undefined)),
   yearOfStudy: z.coerce.number().int().min(1).max(7).optional().or(z.literal("").transform(() => undefined)),
   password: z.string().min(8, "Use at least 8 characters").max(100),
   wantsToSell: z.enum(["true", "false"]).transform((v) => v === "true"),
+});
+
+export const otpConfirmSchema = z.object({
+  code: z.string().regex(/^\d{6}$/, "Enter the 6-digit code we sent you"),
 });
 
 // ── Business ────────────────────────────────────────────────────
@@ -68,7 +74,29 @@ export const businessSchema = z.object({
   isOpen: z.boolean(),
   logoUrl: z.string().url().optional().nullable(),
   bannerUrl: z.string().url().optional().nullable(),
-});
+
+  // Where buyers send money directly for DIRECT_TRANSFER orders. All optional — a seller who
+  // hasn't set this up yet simply can't be paid that way (falls back to cash-on-delivery / escrow).
+  mpesaMethod: z.enum(["TILL", "PAYBILL", "PHONE"]).optional().nullable(),
+  mpesaNumber: z.string().trim().max(20).optional().nullable(),
+  mpesaAccount: z.string().trim().max(40).optional().nullable(),
+}).superRefine((v, ctx) => {
+  if (!v.mpesaMethod) return;
+  const num = (v.mpesaNumber ?? "").trim();
+  if (!num) {
+    ctx.addIssue({ code: "custom", path: ["mpesaNumber"], message: "Enter the number." });
+    return;
+  }
+  if (v.mpesaMethod === "PHONE") {
+    if (!normalizeKenyanPhone(num)) ctx.addIssue({ code: "custom", path: ["mpesaNumber"], message: "Enter a valid Kenyan phone number." });
+  } else if (!/^\d{5,10}$/.test(num)) {
+    ctx.addIssue({ code: "custom", path: ["mpesaNumber"], message: `Enter a valid ${v.mpesaMethod === "TILL" ? "till" : "paybill"} number.` });
+  }
+}).transform((v) => ({
+  ...v,
+  mpesaNumber: v.mpesaMethod === "PHONE" && v.mpesaNumber ? normalizeKenyanPhone(v.mpesaNumber) : v.mpesaNumber?.trim() || null,
+  mpesaAccount: v.mpesaMethod === "PAYBILL" ? (v.mpesaAccount?.trim() || null) : null,
+}));
 
 // ── Product ─────────────────────────────────────────────────────
 export const productSchema = z.object({
@@ -95,7 +123,7 @@ export const placeOrderSchema = z
       }))
       .min(1)
       .max(30),
-    paymentMode: z.enum(["ESCROW", "ON_DELIVERY"]),
+    paymentMode: z.enum(["ESCROW", "ON_DELIVERY", "DIRECT_TRANSFER"]),
     deliveryMethod: z.enum(["PICKUP", "DELIVERY"]),
     deliveryAddress: z.string().trim().max(200).optional().nullable(),
     buyerNote: z.string().trim().max(300).optional().nullable(),
@@ -111,6 +139,12 @@ export const orderActionSchema = z.object({
   action: z.enum(["CONFIRM", "MARK_READY", "MARK_DELIVERED", "RECEIVE", "CANCEL", "DISPUTE"]),
   reason: z.string().trim().max(300).optional(),
   description: z.string().trim().max(1000).optional(),
+});
+
+// Buyer's self-report after sending money directly to a seller's till/paybill/phone. The
+// reference code is NOT verified against Safaricom — it's just evidence for a dispute.
+export const markPaidSchema = z.object({
+  reference: z.string().trim().max(30).optional(),
 });
 
 export const reviewSchema = z.object({

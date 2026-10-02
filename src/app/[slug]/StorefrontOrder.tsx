@@ -7,7 +7,7 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useMemo, useState } from "react";
-import { Minus, Plus, ShieldCheck, ShoppingBag, Wrench } from "lucide-react";
+import { Minus, Plus, ShieldCheck, ShoppingBag, Smartphone, Wrench } from "lucide-react";
 import { api, errorMessage } from "@/lib/client-api";
 import { allowedPaymentModes, formatKes, type PaymentMode } from "@/lib/money";
 import { btnPrimary, inputCls, labelCls } from "@/lib/ui";
@@ -16,9 +16,19 @@ import { cn } from "@/lib/utils";
 export type ViewerState = { kind: "anon" } | { kind: "pending" } | { kind: "owner" } | { kind: "buyer"; phone: string };
 
 interface P { id: string; name: string; description: string; type: "PHYSICAL" | "SERVICE" | "DIGITAL"; price: number; stock: number | null; image: string | null; turnaroundDays: number | null }
-interface B { id: string; name: string; isOpen: boolean; acceptsDelivery: boolean }
+interface B {
+  id: string; name: string; isOpen: boolean; acceptsDelivery: boolean;
+  mpesaMethod: "TILL" | "PAYBILL" | "PHONE" | null; mpesaNumber: string | null; mpesaAccount: string | null;
+}
 
-export function StorefrontOrder({ slug, business, products, viewer }: { slug: string; business: B; products: P[]; viewer: ViewerState }) {
+function mpesaLabel(b: B): string | null {
+  if (!b.mpesaMethod || !b.mpesaNumber) return null;
+  if (b.mpesaMethod === "TILL") return `Buy Goods, Till number ${b.mpesaNumber}`;
+  if (b.mpesaMethod === "PAYBILL") return `Pay Bill ${b.mpesaNumber}${b.mpesaAccount ? `, account ${b.mpesaAccount}` : ""}`;
+  return `Send money to 0${b.mpesaNumber.slice(3)}`;
+}
+
+export function StorefrontOrder({ slug, business, products, viewer, escrowAvailable }: { slug: string; business: B; products: P[]; viewer: ViewerState; escrowAvailable: boolean }) {
   const router = useRouter();
   const [cart, setCart] = useState<Record<string, number>>({});
   const [delivery, setDelivery] = useState<"PICKUP" | "DELIVERY">("PICKUP");
@@ -32,7 +42,10 @@ export function StorefrontOrder({ slug, business, products, viewer }: { slug: st
   const lines = useMemo(() => products.filter((p) => cart[p.id]).map((p) => ({ p, qty: cart[p.id]! })), [cart, products]);
   const total = lines.reduce((s, l) => s + l.p.price * l.qty, 0);
   const hasService = lines.some((l) => l.p.type === "SERVICE");
-  const rule = allowedPaymentModes(total, hasService);
+  const mpesa = mpesaLabel(business);
+  const rawRule = allowedPaymentModes(total, hasService, escrowAvailable);
+  // The seller might not have set up M-Pesa collection yet — don't offer what they can't receive.
+  const rule = mpesa ? rawRule : { ...rawRule, allowed: rawRule.allowed.filter((m) => m !== "DIRECT_TRANSFER") };
   const chosen: PaymentMode = mode && rule.allowed.includes(mode) ? mode : rule.allowed[0]!;
   const canOrder = viewer.kind === "buyer" && business.isOpen;
   const methods: ("PICKUP" | "DELIVERY")[] = business.acceptsDelivery ? ["PICKUP", "DELIVERY"] : ["PICKUP"];
@@ -61,7 +74,11 @@ export function StorefrontOrder({ slug, business, products, viewer }: { slug: st
           phone,
         },
       });
-      router.push(r.paymentMode === "ESCROW" ? `/buyer/orders?pay=${r.orderId}` : `/buyer/orders?placed=${r.orderNumber}`);
+      const dest =
+        r.paymentMode === "ESCROW" ? `/buyer/orders?pay=${r.orderId}`
+        : r.paymentMode === "DIRECT_TRANSFER" ? `/buyer/orders?directPay=${r.orderId}`
+        : `/buyer/orders?placed=${r.orderNumber}`;
+      router.push(dest);
     } catch (e) {
       setError(errorMessage(e));
       setBusy(false);
@@ -139,31 +156,45 @@ export function StorefrontOrder({ slug, business, products, viewer }: { slug: st
             {delivery === "DELIVERY" && <input value={address} onChange={(e) => setAddress(e.target.value)} placeholder="Hostel / room / where to find you" className={`${inputCls} mt-2`} />}
           </div>
 
-          <div>
-            <p className={labelCls}>How do you want to pay?</p>
-            <div className="space-y-2">
-              {(["ESCROW", "ON_DELIVERY"] as const).map((m) => {
-                const allowed = rule.allowed.includes(m);
-                return (
-                  <button key={m} disabled={!allowed} onClick={() => setMode(m)} className={cn("w-full text-left p-3 rounded-lg border text-sm", chosen === m ? "border-primary bg-accent" : "border-gray-300", !allowed && "opacity-40 cursor-not-allowed")}>
-                    <span className="font-semibold flex items-center gap-1.5">{m === "ESCROW" ? <><ShieldCheck className="w-4 h-4 text-primary" />Pay now with M-Pesa — protected</> : "Pay the seller when you get it"}</span>
-                    <span className="block text-xs text-gray-600 mt-0.5">
-                      {m === "ESCROW" ? "We hold your money and only release it to the seller after you confirm you received your order." : "Cash or M-Pesa direct to the seller. Not protected by escrow."}
-                    </span>
-                  </button>
-                );
-              })}
-            </div>
-            <p className="text-xs text-gray-500 mt-1.5">{rule.reason}</p>
-          </div>
+          {rule.allowed.length === 0 ? (
+            <p className="text-sm bg-amber-50 border border-amber-200 text-amber-900 rounded-lg p-3">
+              {business.name} can&apos;t take this kind of order yet — ask them to set up M-Pesa payments on their storefront first.
+            </p>
+          ) : (
+            <>
+              <div>
+                <p className={labelCls}>How do you want to pay?</p>
+                <div className="space-y-2">
+                  {(["ESCROW", "ON_DELIVERY", "DIRECT_TRANSFER"] as const).map((m) => {
+                    const allowed = rule.allowed.includes(m);
+                    return (
+                      <button key={m} disabled={!allowed} onClick={() => setMode(m)} className={cn("w-full text-left p-3 rounded-lg border text-sm", chosen === m ? "border-primary bg-accent" : "border-gray-300", !allowed && "opacity-40 cursor-not-allowed")}>
+                        <span className="font-semibold flex items-center gap-1.5">
+                          {m === "ESCROW" && <><ShieldCheck className="w-4 h-4 text-primary" />Pay now with M-Pesa — protected</>}
+                          {m === "ON_DELIVERY" && "Pay the seller when you get it"}
+                          {m === "DIRECT_TRANSFER" && <><Smartphone className="w-4 h-4 text-primary" />Send M-Pesa directly to {business.name}</>}
+                        </span>
+                        <span className="block text-xs text-gray-600 mt-0.5">
+                          {m === "ESCROW" && "We hold your money and only release it to the seller after you confirm you received your order."}
+                          {m === "ON_DELIVERY" && "Cash, in person. Not protected by escrow."}
+                          {m === "DIRECT_TRANSFER" && (mpesa ? `${mpesa}. Goes straight to the seller — Comrade Market doesn't hold or protect this payment.` : "This seller hasn't set up M-Pesa payments yet.")}
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+                <p className="text-xs text-gray-500 mt-1.5">{rule.reason}</p>
+              </div>
 
-          <div><label className={labelCls}>{chosen === "ESCROW" ? "M-Pesa number to pay from" : "Your phone number (so the seller can reach you)"}</label><input value={phone} onChange={(e) => setPhone(e.target.value)} inputMode="tel" className={inputCls} /></div>
-          <div><label className={labelCls}>Note to seller (optional)</label><input value={note} onChange={(e) => setNote(e.target.value)} maxLength={300} className={inputCls} placeholder="e.g. no onions please" /></div>
+              <div><label className={labelCls}>{chosen === "ESCROW" ? "M-Pesa number to pay from" : "Your phone number (so the seller can reach you)"}</label><input value={phone} onChange={(e) => setPhone(e.target.value)} inputMode="tel" className={inputCls} /></div>
+              <div><label className={labelCls}>Note to seller (optional)</label><input value={note} onChange={(e) => setNote(e.target.value)} maxLength={300} className={inputCls} placeholder="e.g. no onions please" /></div>
 
-          {error && <p role="alert" className="text-sm text-red-600 bg-red-50 border border-red-200 rounded-lg px-3 py-2">{error}</p>}
-          <button onClick={checkout} disabled={busy || !phone || (delivery === "DELIVERY" && !address)} className={`${btnPrimary} w-full py-3`}>
-            {busy ? "Placing order…" : chosen === "ESCROW" ? `Pay ${formatKes(total)} securely` : `Place order · ${formatKes(total)}`}
-          </button>
+              {error && <p role="alert" className="text-sm text-red-600 bg-red-50 border border-red-200 rounded-lg px-3 py-2">{error}</p>}
+              <button onClick={checkout} disabled={busy || !phone || (delivery === "DELIVERY" && !address)} className={`${btnPrimary} w-full py-3`}>
+                {busy ? "Placing order…" : chosen === "ESCROW" ? `Pay ${formatKes(total)} securely` : `Place order · ${formatKes(total)}`}
+              </button>
+            </>
+          )}
         </div>
       )}
     </section>

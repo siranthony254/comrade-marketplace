@@ -21,6 +21,8 @@ export default async function StorefrontPage() {
           name: b.name, slug: b.slug, tagline: b.tagline ?? "", description: b.description ?? "", category: b.category,
           whatsappNumber: b.whatsappNumber ? `0${b.whatsappNumber.slice(3)}` : "", acceptsDelivery: b.acceptsDelivery,
           deliveryAreas: b.deliveryAreas.join(", "), isOpen: b.isOpen, logoUrl: b.logoUrl, bannerUrl: b.bannerUrl,
+          mpesaMethod: b.mpesaMethod, mpesaNumber: b.mpesaMethod === "PHONE" && b.mpesaNumber ? `0${b.mpesaNumber.slice(3)}` : b.mpesaNumber ?? "",
+          mpesaAccount: b.mpesaAccount ?? "",
         } : null}
       />
     </div>

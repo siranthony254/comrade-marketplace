@@ -10,6 +10,7 @@ import { BadgeCheck, MapPin, MessageCircle, Star, Truck } from "lucide-react";
 import { prisma } from "@/lib/prisma";
 import { RESERVED_SLUGS } from "@/lib/constants/platform";
 import { getCurrentUser } from "@/lib/session";
+import { isEscrowAvailable } from "@/lib/payments";
 import { publicName } from "@/lib/queries";
 import { timeAgo } from "@/lib/utils";
 import { StorefrontOrder, type ViewerState } from "./StorefrontOrder";
@@ -105,9 +106,13 @@ export default async function BusinessPage({ params }: { params: { slug: string 
       <main className="max-w-3xl mx-auto px-4 py-8 space-y-10">
         <StorefrontOrder
           slug={business.slug}
-          business={{ id: business.id, name: business.name, isOpen: business.isOpen, acceptsDelivery: business.acceptsDelivery }}
+          business={{
+            id: business.id, name: business.name, isOpen: business.isOpen, acceptsDelivery: business.acceptsDelivery,
+            mpesaMethod: business.mpesaMethod, mpesaNumber: business.mpesaNumber, mpesaAccount: business.mpesaAccount,
+          }}
           products={business.products.map((p) => ({ id: p.id, name: p.name, description: p.description, type: p.type, price: p.price, stock: p.stock, image: p.images[0] ?? null, turnaroundDays: p.turnaroundDays }))}
           viewer={viewer}
+          escrowAvailable={isEscrowAvailable()}
         />
 
         {business.reviews.length > 0 && (

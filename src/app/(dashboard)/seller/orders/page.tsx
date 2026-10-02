@@ -43,13 +43,17 @@ export default async function SellerOrdersPage() {
             <p>{o.deliveryMethod === "DELIVERY" ? `Deliver to: ${o.deliveryAddress}` : "Customer will pick up"}</p>
             {o.buyerNote && <p>Note: “{o.buyerNote}”</p>}
             <p>
-              {o.paymentMode === "ESCROW"
-                ? <>🔒 Paid via escrow · you receive <strong className="text-foreground">{formatKes(o.sellerPayout)}</strong> (after {formatKes(o.platformFee)} fee)</>
-                : <>💵 Pay on delivery · collect <strong className="text-foreground">{formatKes(o.total)}</strong> from the buyer yourself</>}
+              {o.paymentMode === "ESCROW" && <>🔒 Paid via escrow · you receive <strong className="text-foreground">{formatKes(o.sellerPayout)}</strong> (after {formatKes(o.platformFee)} fee)</>}
+              {o.paymentMode === "ON_DELIVERY" && <>💵 Pay on delivery · collect <strong className="text-foreground">{formatKes(o.total)}</strong> from the buyer yourself</>}
+              {o.paymentMode === "DIRECT_TRANSFER" && <>📱 Direct M-Pesa · buyer sends <strong className="text-foreground">{formatKes(o.total)}</strong> straight to you — check your own M-Pesa before accepting</>}
             </p>
           </div>
 
-          <SellerOrderActions orderId={o.id} status={o.status} />
+          <SellerOrderActions
+            orderId={o.id} status={o.status} paymentMode={o.paymentMode}
+            buyerMarkedPaidAt={!!o.buyerMarkedPaidAt} sellerConfirmedPaidAt={!!o.sellerConfirmedPaidAt}
+            buyerPaymentRef={o.buyerPaymentRef} hasProof={!!o.buyerPaymentProofKey}
+          />
         </div>
       ))}
     </div>

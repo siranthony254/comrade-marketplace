@@ -10,6 +10,10 @@ describe("calculateAmounts", () => {
     expect(calculateAmounts(250, "ON_DELIVERY")).toEqual({ subtotal: 250, total: 250, platformFee: 0, sellerPayout: 250 });
   });
 
+  it("never charges a fee on DIRECT_TRANSFER orders either — the platform never touches that money", () => {
+    expect(calculateAmounts(1500, "DIRECT_TRANSFER")).toEqual({ subtotal: 1500, total: 1500, platformFee: 0, sellerPayout: 1500 });
+  });
+
   it("always keeps whole shillings and the parts always add back up", () => {
     for (const subtotal of [100, 101, 333, 799, 1234, 9999, 12345]) {
       const a = calculateAmounts(subtotal, "ESCROW");
@@ -25,20 +29,45 @@ describe("calculateAmounts", () => {
 });
 
 describe("allowedPaymentModes", () => {
-  it("forces escrow for any service, however small", () => {
-    expect(allowedPaymentModes(50, true).allowed).toEqual(["ESCROW"]);
+  describe("when a real escrow provider is available", () => {
+    it("offers escrow or direct-transfer for any service, however small — never plain cash", () => {
+      expect(allowedPaymentModes(50, true, true).allowed).toEqual(["ESCROW", "DIRECT_TRANSFER"]);
+    });
+    it("offers escrow or direct-transfer at KES 300 and above — never plain cash", () => {
+      expect(allowedPaymentModes(300, false, true).allowed).toEqual(["ESCROW", "DIRECT_TRANSFER"]);
+      expect(allowedPaymentModes(5000, false, true).allowed).toEqual(["ESCROW", "DIRECT_TRANSFER"]);
+    });
+    it("below KES 100, cash or direct-transfer (escrow's fee would be pennies, not worth it)", () => {
+      expect(allowedPaymentModes(60, false, true).allowed).toEqual(["ON_DELIVERY", "DIRECT_TRANSFER"]);
+      expect(allowedPaymentModes(99, false, true).allowed).toEqual(["ON_DELIVERY", "DIRECT_TRANSFER"]);
+    });
+    it("lets the buyer choose freely in between", () => {
+      expect(allowedPaymentModes(100, false, true).allowed).toEqual(["ESCROW", "ON_DELIVERY", "DIRECT_TRANSFER"]);
+      expect(allowedPaymentModes(299, false, true).allowed).toEqual(["ESCROW", "ON_DELIVERY", "DIRECT_TRANSFER"]);
+    });
   });
-  it("forces escrow at KES 300 and above", () => {
-    expect(allowedPaymentModes(300, false).allowed).toEqual(["ESCROW"]);
-    expect(allowedPaymentModes(5000, false).allowed).toEqual(["ESCROW"]);
+
+  describe("when escrow is NOT available (no payment provider configured yet)", () => {
+    it("direct-transfer is the only option for services — never plain cash", () => {
+      expect(allowedPaymentModes(50, true, false).allowed).toEqual(["DIRECT_TRANSFER"]);
+    });
+    it("direct-transfer is the only option at KES 300 and above", () => {
+      expect(allowedPaymentModes(300, false, false).allowed).toEqual(["DIRECT_TRANSFER"]);
+      expect(allowedPaymentModes(5000, false, false).allowed).toEqual(["DIRECT_TRANSFER"]);
+    });
+    it("below KES 100, cash or direct-transfer — unaffected by escrow's availability", () => {
+      expect(allowedPaymentModes(60, false, false).allowed).toEqual(["ON_DELIVERY", "DIRECT_TRANSFER"]);
+    });
+    it("in between, cash or direct-transfer, never escrow", () => {
+      expect(allowedPaymentModes(150, false, false).allowed).toEqual(["ON_DELIVERY", "DIRECT_TRANSFER"]);
+    });
   });
-  it("only allows pay-on-delivery below KES 100 (the KES 60 chapati case)", () => {
-    expect(allowedPaymentModes(60, false).allowed).toEqual(["ON_DELIVERY"]);
-    expect(allowedPaymentModes(99, false).allowed).toEqual(["ON_DELIVERY"]);
-  });
-  it("lets the buyer choose in between", () => {
-    expect(allowedPaymentModes(100, false).allowed).toEqual(["ESCROW", "ON_DELIVERY"]);
-    expect(allowedPaymentModes(299, false).allowed).toEqual(["ESCROW", "ON_DELIVERY"]);
+
+  it("never offers plain cash for a service or a big order, regardless of escrow availability", () => {
+    for (const escrowAvailable of [true, false]) {
+      expect(allowedPaymentModes(50, true, escrowAvailable).allowed).not.toContain("ON_DELIVERY");
+      expect(allowedPaymentModes(500, false, escrowAvailable).allowed).not.toContain("ON_DELIVERY");
+    }
   });
 });
 

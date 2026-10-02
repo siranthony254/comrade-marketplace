@@ -4,13 +4,16 @@
 // but cannot buy, sell or list.
 //
 // Trust model: NOTHING about verification comes from the client. There is no "faceVerified" flag.
+//
+// No phone OTP here on purpose: it would make signup depend on an SMS provider being
+// configured (Africa's Talking), and ID review already gates buying/selling. Phone ownership
+// can instead be verified any time afterwards, self-service, at /account/phone.
 
 import bcrypt from "bcryptjs";
 import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { handle, ok, ApiError } from "@/lib/api";
 import { registerSchema } from "@/lib/validations";
-import { verifyOtp } from "@/lib/otp";
 import { savePrivateImage } from "@/lib/storage";
 import { PLATFORM } from "@/lib/constants/platform";
 
@@ -40,10 +43,6 @@ export const POST = handle(async (req) => {
   if (emailTaken) throw new ApiError(409, "That email already has an account.");
   if (phoneTaken) throw new ApiError(409, "That phone number already has an account.");
   if (idTaken) throw new ApiError(409, "That student ID is already registered at this school.");
-
-  if (!(await verifyOtp(data.phone, data.otp))) {
-    throw new ApiError(400, "That code is wrong or has expired. Request a new one.");
-  }
 
   const [idPhotoKey, selfieKey] = await Promise.all([
     savePrivateImage("student-id", Buffer.from(await idFile.arrayBuffer())),

@@ -10,7 +10,7 @@ export default async function DashboardLayout({ children }: { children: React.Re
   const user = await requireUser();
   const name = user.studentProfile?.fullName ?? user.email;
   return (
-    <DashboardShell user={{ name, role: user.role, status: user.status }}>
+    <DashboardShell user={{ name, role: user.role, status: user.status, phoneVerified: !!user.phoneVerifiedAt }}>
       {children}
     </DashboardShell>
   );

@@ -4,15 +4,24 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
 import { QRCodeSVG } from "qrcode.react";
-import { Check, Copy, ImagePlus, Share2 } from "lucide-react";
+import { Check, Copy, ImagePlus, Share2, Smartphone } from "lucide-react";
 import { api, errorMessage } from "@/lib/client-api";
 import { BUSINESS_CATEGORIES } from "@/lib/constants/platform";
 import { makeSlug } from "@/lib/validations";
 import { btnPrimary, btnSecondary, inputCls, labelCls } from "@/lib/ui";
 
-interface Initial { name: string; slug: string; tagline: string; description: string; category: string; whatsappNumber: string; acceptsDelivery: boolean; deliveryAreas: string; isOpen: boolean; logoUrl: string | null; bannerUrl: string | null }
+type MpesaMethod = "TILL" | "PAYBILL" | "PHONE";
+interface Initial {
+  name: string; slug: string; tagline: string; description: string; category: string; whatsappNumber: string;
+  acceptsDelivery: boolean; deliveryAreas: string; isOpen: boolean; logoUrl: string | null; bannerUrl: string | null;
+  mpesaMethod: MpesaMethod | null; mpesaNumber: string; mpesaAccount: string;
+}
 
-const BLANK: Initial = { name: "", slug: "", tagline: "", description: "", category: BUSINESS_CATEGORIES[0], whatsappNumber: "", acceptsDelivery: false, deliveryAreas: "", isOpen: true, logoUrl: null, bannerUrl: null };
+const BLANK: Initial = {
+  name: "", slug: "", tagline: "", description: "", category: BUSINESS_CATEGORIES[0], whatsappNumber: "",
+  acceptsDelivery: false, deliveryAreas: "", isOpen: true, logoUrl: null, bannerUrl: null,
+  mpesaMethod: null, mpesaNumber: "", mpesaAccount: "",
+};
 
 export function StorefrontForm({ initial, baseUrl, canEdit }: { initial: Initial | null; baseUrl: string; canEdit: boolean }) {
   const router = useRouter();
@@ -53,6 +62,7 @@ export function StorefrontForm({ initial, baseUrl, canEdit }: { initial: Initial
           whatsappNumber: f.whatsappNumber || null, acceptsDelivery: f.acceptsDelivery,
           deliveryAreas: f.deliveryAreas.split(",").map((s) => s.trim()).filter(Boolean),
           isOpen: f.isOpen, logoUrl: f.logoUrl, bannerUrl: f.bannerUrl,
+          mpesaMethod: f.mpesaMethod, mpesaNumber: f.mpesaNumber || null, mpesaAccount: f.mpesaAccount || null,
         },
       });
       setSaved(true);
@@ -121,6 +131,33 @@ export function StorefrontForm({ initial, baseUrl, canEdit }: { initial: Initial
         <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={f.acceptsDelivery} disabled={!canEdit} onChange={(e) => set("acceptsDelivery", e.target.checked)} /> I deliver</label>
         {f.acceptsDelivery && <div><label className={labelCls}>Where do you deliver? (comma separated)</label><input value={f.deliveryAreas} disabled={!canEdit} onChange={(e) => set("deliveryAreas", e.target.value)} className={inputCls} placeholder="Hostels A–D, Main campus" /></div>}
         <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={f.isOpen} disabled={!canEdit} onChange={(e) => set("isOpen", e.target.checked)} /> I&apos;m taking orders right now</label>
+
+        <div className="border-t border-border pt-4 space-y-3">
+          <div>
+            <p className="font-medium text-sm flex items-center gap-1.5"><Smartphone className="w-4 h-4 text-primary" />Get paid directly by M-Pesa</p>
+            <p className="text-xs text-muted-foreground mt-0.5">
+              Buyers can send money straight to you here. <strong>This bypasses Comrade Market entirely</strong> — we don&apos;t hold, see, or protect this money, and can&apos;t force a refund if something goes wrong. We&apos;ll still help mediate a dispute.
+            </p>
+          </div>
+          <div className="flex gap-2">
+            {([null, "TILL", "PAYBILL", "PHONE"] as const).map((m) => (
+              <button key={m ?? "none"} type="button" disabled={!canEdit} onClick={() => set("mpesaMethod", m)} className={`flex-1 py-2 rounded-lg border text-xs font-medium ${f.mpesaMethod === m ? "border-primary bg-accent text-primary" : "border-border"}`}>
+                {m === null ? "Not set up" : m === "TILL" ? "Till (Buy Goods)" : m === "PAYBILL" ? "Paybill" : "My phone"}
+              </button>
+            ))}
+          </div>
+          {f.mpesaMethod && (
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className={labelCls}>{f.mpesaMethod === "TILL" ? "Till number" : f.mpesaMethod === "PAYBILL" ? "Paybill number" : "Phone number"}</label>
+                <input value={f.mpesaNumber} disabled={!canEdit} onChange={(e) => set("mpesaNumber", e.target.value)} className={inputCls} placeholder={f.mpesaMethod === "PHONE" ? "0712 345 678" : "e.g. 123456"} />
+              </div>
+              {f.mpesaMethod === "PAYBILL" && (
+                <div><label className={labelCls}>Account number (optional)</label><input value={f.mpesaAccount} disabled={!canEdit} onChange={(e) => set("mpesaAccount", e.target.value)} className={inputCls} /></div>
+              )}
+            </div>
+          )}
+        </div>
 
         {error && <p role="alert" className="text-sm text-red-600 bg-red-50 border border-red-200 rounded-lg px-3 py-2">{error}</p>}
         {saved && <p className="text-sm text-green-700">Saved ✓</p>}
