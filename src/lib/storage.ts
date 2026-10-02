@@ -35,6 +35,25 @@ const PRIVATE_KEY_RE = /^[a-z-]{1,30}\/[a-f0-9-]{36}$/;
 
 export type PrivateKind = "student-id" | "selfie" | "evidence";
 
+/**
+ * The local filesystem fallback only works when the process has a writable, persistent
+ * `process.cwd()` — true in dev, false on Vercel (and most serverless hosts), whose functions
+ * have a read-only filesystem outside /tmp. Without this guard, a misconfigured production
+ * deploy wouldn't crash loudly: it would either throw an opaque EROFS/ENOENT deep in `fs`, or
+ * (worse) "succeed" into a directory that's wiped between invocations, silently losing ID
+ * photos. Fail clearly instead, the same way payments/index.ts and sms.ts refuse to run
+ * their dev-only fallbacks in production.
+ */
+function assertStorageConfigured(): void {
+  if (!useCloudinary && process.env.NODE_ENV === "production") {
+    throw new Error(
+      "Image storage is not configured for production. Set NEXT_PUBLIC_CLOUDINARY_CLOUD_NAME, " +
+        "CLOUDINARY_API_KEY and CLOUDINARY_API_SECRET — the local filesystem fallback cannot work " +
+        "on Vercel's read-only filesystem.",
+    );
+  }
+}
+
 /** Validate + normalise an uploaded image. Throws ApiError(400) for anything that isn't a real image. */
 export async function processImage(input: Buffer, maxDim: number): Promise<Buffer> {
   if (input.length > PLATFORM.limits.maxUploadBytes) {
@@ -61,6 +80,7 @@ function uploadToCloudinary(buffer: Buffer, options: Record<string, unknown>): P
 
 /** Store a private image; returns the opaque key to save in the database. */
 export async function savePrivateImage(kind: PrivateKind, input: Buffer): Promise<string> {
+  assertStorageConfigured();
   const image = await processImage(input, 1600);
   const id = randomUUID();
   if (useCloudinary) {
@@ -75,6 +95,7 @@ export async function savePrivateImage(kind: PrivateKind, input: Buffer): Promis
 
 /** Read a private image back. Callers MUST have already authorised the request. */
 export async function readPrivateImage(key: string): Promise<Buffer> {
+  assertStorageConfigured();
   if (!PRIVATE_KEY_RE.test(key)) throw new ApiError(400, "Invalid file key."); // blocks path traversal
   if (useCloudinary) {
     const url = cloudinary.utils.private_download_url(key, "jpg", { type: "private", expires_at: Math.floor(Date.now() / 1000) + 60 });
@@ -91,6 +112,7 @@ export async function readPrivateImage(key: string): Promise<Buffer> {
 
 /** Store a public image (logo, banner, product photo); returns its URL. */
 export async function savePublicImage(input: Buffer, maxDim = 1200): Promise<string> {
+  assertStorageConfigured();
   const image = await processImage(input, maxDim);
   const id = randomUUID();
   if (useCloudinary) {
@@ -104,6 +126,7 @@ export async function savePublicImage(input: Buffer, maxDim = 1200): Promise<str
 
 /** Permanently delete a private image (used when a signup is rejected — we don't keep ID photos we don't need). */
 export async function deletePrivateImage(key: string): Promise<void> {
+  assertStorageConfigured();
   if (!PRIVATE_KEY_RE.test(key)) return;
   if (useCloudinary) {
     await cloudinary.uploader.destroy(key, { type: "private", resource_type: "image" }).catch(() => undefined);

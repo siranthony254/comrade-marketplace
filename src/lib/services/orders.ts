@@ -36,8 +36,23 @@ type OrderFull = Prisma.OrderGetPayload<{ include: typeof ORDER_INCLUDE }>;
 const minutes = (n: number) => new Date(Date.now() + n * 60_000);
 const hours = (n: number) => new Date(Date.now() + n * 3_600_000);
 
+// Prisma's default interactive-transaction timeout is 5000ms. Verified against the real
+// Supabase pooler this app deploys to: a placeOrder transaction (a handful of sequential
+// round-trips — stock update, order insert, item insert) took 5.2-5.7s and got rolled back
+// mid-way with "Transaction already closed", which would make real checkouts fail at random.
+// Generous headroom here; the actual fix is keeping transactions short (see the notify() note
+// below), this is the safety margin on top of that.
+const TX_OPTIONS = { maxWait: 10_000, timeout: 20_000 };
+
 async function notify(tx: Tx | typeof prisma, userId: string, n: { type: string; title: string; body: string; link?: string }) {
   await tx.notification.create({ data: { userId, ...n } });
+}
+
+/** Fire a notification after a money-moving transaction has already committed. Never let a
+ *  notification failure (or the extra round-trip) threaten — or be blamed on — the transaction
+ *  that actually matters. Errors are logged, not thrown: the caller's real work is already done. */
+async function notifyAfter(userId: string, n: { type: string; title: string; body: string; link?: string }) {
+  await notify(prisma, userId, n).catch((e) => console.error("[notify] failed (non-fatal)", e));
 }
 
 // ─── PLACING AN ORDER ───────────────────────────────────────────
@@ -118,17 +133,8 @@ export async function placeOrder(buyer: { profileId: string; userId: string; ful
           },
           include: ORDER_INCLUDE,
         });
-
-        if (!isEscrow) {
-          await notify(tx, business.owner.userId, {
-            type: "ORDER",
-            title: "New order!",
-            body: `${buyer.fullName} ordered ${created.orderNumber} (KES ${created.total.toLocaleString()}) — pay on delivery.`,
-            link: "/seller/orders",
-          });
-        }
         return created;
-      });
+      }, TX_OPTIONS);
     } catch (e) {
       const collision = e instanceof Prisma.PrismaClientKnownRequestError && e.code === "P2002";
       if (!collision) throw e; // only an order-number collision is worth retrying
@@ -136,7 +142,16 @@ export async function placeOrder(buyer: { profileId: string; userId: string; ful
   }
   if (!order) throw new ApiError(500, "Couldn't create the order. Please try again.");
 
-  if (!isEscrow) return { order, payment: null as null | { ok: boolean; error?: string } };
+  if (!isEscrow) {
+    // Notified after commit, not inside the transaction above — see notifyAfter().
+    await notifyAfter(business.owner.userId, {
+      type: "ORDER",
+      title: "New order!",
+      body: `${buyer.fullName} ordered ${order.orderNumber} (KES ${order.total.toLocaleString()}) — pay on delivery.`,
+      link: "/seller/orders",
+    });
+    return { order, payment: null as null | { ok: boolean; error?: string } };
+  }
   const payment = await initiatePayment(order.id);
   return { order, payment };
 }
@@ -154,15 +169,25 @@ export async function initiatePayment(orderId: string): Promise<{ ok: boolean; e
   if (recent) return { ok: true, alreadyPrompting: true };
 
   const provider = getPaymentProvider();
-  const payment = await prisma.payment.create({
-    data: {
-      orderId: order.id,
-      provider: provider.name,
-      apiRef: `${order.orderNumber}-${order.payments.length + 1}`,
-      amount: order.total,
-      phone: order.buyerPhone,
-    },
-  });
+  let payment;
+  try {
+    payment = await prisma.payment.create({
+      data: {
+        orderId: order.id,
+        provider: provider.name,
+        apiRef: `${order.orderNumber}-${order.payments.length + 1}`,
+        amount: order.total,
+        phone: order.buyerPhone,
+      },
+    });
+  } catch (e) {
+    // Two "resend" clicks (or two tabs) raced past the `recent` check above before either had
+    // committed, and both computed the same apiRef from the same payments.length snapshot.
+    // The unique apiRef constraint caught it — tell the caller we're already on it rather than
+    // surfacing a raw 500 for what is actually a harmless double-click.
+    if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === "P2002") return { ok: true, alreadyPrompting: true };
+    throw e;
+  }
   await prisma.order.update({ where: { id: order.id }, data: { expiresAt: minutes(PLATFORM.escrow.pendingPaymentMinutes) } });
 
   const [firstName, ...rest] = order.buyer.fullName.split(" ");
@@ -188,40 +213,44 @@ export async function initiatePayment(orderId: string): Promise<{ ok: boolean; e
  * ALWAYS call this with a result obtained from provider.getPaymentStatus(), never from a webhook body.
  */
 export async function settlePayment(paymentId: string, result: "SUCCEEDED" | "FAILED", failReason?: string) {
-  const refundPayoutIds: string[] = [];
-
-  await prisma.$transaction(async (tx) => {
+  // The transaction returns what happened rather than mutating an outer variable from inside
+  // the closure — same outcome, but doesn't depend on TS's (inconsistent) narrowing of a `let`
+  // reassigned inside a callback.
+  const outcome = await prisma.$transaction(async (tx) => {
     const claimed = await tx.payment.updateMany({
       where: { id: paymentId, status: "PENDING" },
       data: { status: result, paidAt: result === "SUCCEEDED" ? new Date() : null, failReason: result === "FAILED" ? failReason ?? "Payment failed" : null },
     });
-    if (claimed.count !== 1 || result === "FAILED") return; // already settled, or failed (order stays open for a retry)
+    if (claimed.count !== 1 || result === "FAILED") return null; // already settled, or failed (order stays open for a retry)
 
     const payment = await tx.payment.findUniqueOrThrow({ where: { id: paymentId } });
     const order = await tx.order.findUniqueOrThrow({ where: { id: payment.orderId }, include: ORDER_INCLUDE });
 
     if (order.status === "PENDING_PAYMENT") {
       await tx.order.update({ where: { id: order.id }, data: { status: "PLACED", escrowStatus: "HELD", placedAt: new Date(), expiresAt: null } });
-      await notify(tx, order.business.owner.userId, {
-        type: "ORDER",
-        title: "New paid order!",
-        body: `${order.buyer.fullName} paid KES ${order.total.toLocaleString()} for ${order.orderNumber}. The money is held safely until they receive it.`,
-        link: "/seller/orders",
-      });
-    } else if (order.status === "CANCELLED" && order.escrowStatus !== "REFUNDED") {
-      // (5) Paid after the order was cancelled / expired: give it straight back.
-      const id = await queueRefund(tx, order, payment.phone);
-      await tx.order.update({ where: { id: order.id }, data: { escrowStatus: "REFUNDED" } });
-      if (id) refundPayoutIds.push(id);
-    } else {
-      // Paid twice, or paid on an order that has moved on. Don't guess with money: flag it for a human.
-      await tx.auditLog.create({
-        data: { action: "UNEXPECTED_PAYMENT", entityType: "Payment", entityId: payment.id, metadata: { orderId: order.id, orderStatus: order.status, amount: payment.amount } },
-      });
+      return {
+        refundPayoutId: null,
+        paidNotify: {
+          userId: order.business.owner.userId,
+          body: `${order.buyer.fullName} paid KES ${order.total.toLocaleString()} for ${order.orderNumber}. The money is held safely until they receive it.`,
+        },
+      };
     }
-  });
+    if (order.status === "CANCELLED" && order.escrowStatus !== "REFUNDED") {
+      // (5) Paid after the order was cancelled / expired: give it straight back.
+      const refundPayoutId = await queueRefund(tx, order, payment.phone);
+      await tx.order.update({ where: { id: order.id }, data: { escrowStatus: "REFUNDED" } });
+      return { refundPayoutId, paidNotify: null };
+    }
+    // Paid twice, or paid on an order that has moved on. Don't guess with money: flag it for a human.
+    await tx.auditLog.create({
+      data: { action: "UNEXPECTED_PAYMENT", entityType: "Payment", entityId: payment.id, metadata: { orderId: order.id, orderStatus: order.status, amount: payment.amount } },
+    });
+    return null;
+  }, TX_OPTIONS);
 
-  for (const id of refundPayoutIds) await processPayout(id).catch((e) => console.error("[payout]", e));
+  if (outcome?.paidNotify) await notifyAfter(outcome.paidNotify.userId, { type: "ORDER", title: "New paid order!", body: outcome.paidNotify.body, link: "/seller/orders" });
+  if (outcome?.refundPayoutId) await processPayout(outcome.refundPayoutId).catch((e) => console.error("[payout]", e));
 }
 
 // ─── PAYOUTS (money out) ────────────────────────────────────────
@@ -244,11 +273,19 @@ async function queueRefund(tx: Tx, order: OrderFull, payerPhone?: string): Promi
   const existing = await tx.payout.findUnique({ where: { orderId_kind: { orderId: order.id, kind: "BUYER_REFUND" } } });
   if (existing) return null;
   const phone = payerPhone ?? order.payments.find((pay) => pay.status === "SUCCEEDED")?.phone ?? order.buyerPhone;
-  const p = await tx.payout.create({
-    data: { orderId: order.id, kind: "BUYER_REFUND", phone, recipient: order.buyer.fullName.slice(0, 40), amount: order.total },
-  });
-  await tx.auditLog.create({ data: { action: "REFUND_QUEUED", entityType: "Order", entityId: order.id, metadata: { amount: p.amount } } });
-  return p.id;
+  try {
+    const p = await tx.payout.create({
+      data: { orderId: order.id, kind: "BUYER_REFUND", phone, recipient: order.buyer.fullName.slice(0, 40), amount: order.total },
+    });
+    await tx.auditLog.create({ data: { action: "REFUND_QUEUED", entityType: "Order", entityId: order.id, metadata: { amount: p.amount } } });
+    return p.id;
+  } catch (e) {
+    // Lost a race with another caller queueing the same refund (e.g. a late webhook landing
+    // the same moment a cron run cancels the order) — the unique (orderId, kind) index caught
+    // it, which is exactly what it's for. Treat it the same as "already queued".
+    if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === "P2002") return null;
+    throw e;
+  }
 }
 
 /** Send one queued payout. Safe to call repeatedly: only a PENDING payout is ever claimed (6). */
@@ -373,32 +410,34 @@ export async function applyOrderAction(
     const claimed = await tx.order.updateMany({ where: { id: order.id, status: order.status }, data });
     if (claimed.count !== 1) throw new ApiError(409, "This order just changed. Refresh and try again.");
 
-    await notifyTransition(tx, action, actor.kind, order, { sellerUser, buyerUser });
-    if (action === "DISPUTE") {
-      const admins = await tx.user.findMany({ where: { role: "ADMIN" }, select: { id: true } });
-      for (const a of admins) {
-        await notify(tx, a.id, { type: "DISPUTE", title: "New dispute", body: `Order ${order.orderNumber}: ${extra.reason}`, link: "/admin/disputes" });
-      }
-    }
+    // Audit trail is part of the atomic change (compliance/dispute evidence); user-facing
+    // notifications are not — they're sent after commit, see below.
     if (action === "RECEIVE" || action === "CANCEL" || action === "DISPUTE") {
       await tx.auditLog.create({ data: { action: `ORDER_${action}`, entityType: "Order", entityId: order.id, metadata: { by: actor.kind, from: order.status, to: t.to } } });
     }
-  });
+  }, TX_OPTIONS);
+
+  await notifyTransition(action, actor.kind, order, { sellerUser, buyerUser });
+  if (action === "DISPUTE") {
+    const admins = await prisma.user.findMany({ where: { role: "ADMIN" }, select: { id: true } });
+    for (const a of admins) {
+      await notifyAfter(a.id, { type: "DISPUTE", title: "New dispute", body: `Order ${order.orderNumber}: ${extra.reason}`, link: "/admin/disputes" });
+    }
+  }
 
   for (const id of payoutIds) await processPayout(id).catch((e) => console.error("[payout]", e));
   return prisma.order.findUniqueOrThrow({ where: { id: order.id }, include: ORDER_INCLUDE });
 }
 
 async function notifyTransition(
-  tx: Tx,
   action: OrderAction,
   by: ActorRef["kind"],
   order: OrderFull,
   users: { sellerUser: string; buyerUser: string },
 ) {
   const n = order.orderNumber;
-  const toBuyer = (title: string, body: string) => notify(tx, users.buyerUser, { type: "ORDER", title, body, link: "/buyer/orders" });
-  const toSeller = (title: string, body: string) => notify(tx, users.sellerUser, { type: "ORDER", title, body, link: "/seller/orders" });
+  const toBuyer = (title: string, body: string) => notifyAfter(users.buyerUser, { type: "ORDER", title, body, link: "/buyer/orders" });
+  const toSeller = (title: string, body: string) => notifyAfter(users.sellerUser, { type: "ORDER", title, body, link: "/seller/orders" });
 
   switch (action) {
     case "CONFIRM": return toBuyer("Order confirmed", `${order.business.name} confirmed ${n}.`);
@@ -414,7 +453,8 @@ async function notifyTransition(
 
 export async function resolveDispute(disputeId: string, adminId: string, outcome: "BUYER" | "SELLER", note: string) {
   const payoutIds: string[] = [];
-  await prisma.$transaction(async (tx) => {
+
+  const notifyUsers = await prisma.$transaction(async (tx) => {
     const dispute = await tx.dispute.findUnique({ where: { id: disputeId }, include: { order: { include: ORDER_INCLUDE } } });
     if (!dispute) throw new ApiError(404, "Dispute not found.");
     const order = dispute.order;
@@ -431,6 +471,17 @@ export async function resolveDispute(disputeId: string, adminId: string, outcome
         ? { status: "CANCELLED", cancelledAt: new Date(), cancelReason: "Dispute resolved in the buyer's favour" }
         : { status: "COMPLETED", completedAt: new Date() };
 
+    if (outcome === "BUYER") {
+      // BUG FIX: a buyer-won dispute means the buyer didn't get the goods — exactly like a
+      // CANCEL, the seller's stock must come back. This was missing: applyOrderAction's CANCEL
+      // restocks, but this path (the other way an order ends without the buyer keeping the
+      // goods) didn't, so a seller's stock count silently drifted low after every dispute they
+      // lost. Runs regardless of payment mode, same as CANCEL — this is about inventory, not escrow.
+      for (const item of order.items) {
+        await tx.product.updateMany({ where: { id: item.productId, stock: { not: null } }, data: { stock: { increment: item.quantity } } });
+      }
+    }
+
     if (held) {
       if (outcome === "BUYER") {
         data.escrowStatus = "REFUNDED";
@@ -446,10 +497,14 @@ export async function resolveDispute(disputeId: string, adminId: string, outcome
     if (moved.count !== 1) throw new ApiError(409, "Order is no longer in dispute.");
 
     await tx.auditLog.create({ data: { actorId: adminId, action: "DISPUTE_RESOLVED", entityType: "Dispute", entityId: disputeId, metadata: { outcome, note, orderId: order.id } } });
-    const msg = `Dispute on ${order.orderNumber} resolved in favour of the ${outcome === "BUYER" ? "buyer" : "seller"}: ${note}`;
-    await notify(tx, order.buyer.userId, { type: "DISPUTE", title: "Dispute resolved", body: msg, link: "/buyer/orders" });
-    await notify(tx, order.business.owner.userId, { type: "DISPUTE", title: "Dispute resolved", body: msg, link: "/seller/orders" });
-  });
+    return { buyerUser: order.buyer.userId, sellerUser: order.business.owner.userId, orderNumber: order.orderNumber };
+  }, TX_OPTIONS);
+
+  if (notifyUsers) {
+    const msg = `Dispute on ${notifyUsers.orderNumber} resolved in favour of the ${outcome === "BUYER" ? "buyer" : "seller"}: ${note}`;
+    await notifyAfter(notifyUsers.buyerUser, { type: "DISPUTE", title: "Dispute resolved", body: msg, link: "/buyer/orders" });
+    await notifyAfter(notifyUsers.sellerUser, { type: "DISPUTE", title: "Dispute resolved", body: msg, link: "/seller/orders" });
+  }
   for (const id of payoutIds) await processPayout(id).catch((e) => console.error("[payout]", e));
 }
 
