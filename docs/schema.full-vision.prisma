@@ -1,0 +1,807 @@
+// ─────────────────────────────────────────────────────────────
+// COMRADE MARKET — DATABASE SCHEMA
+// Run: npx prisma generate && npx prisma db push
+// ─────────────────────────────────────────────────────────────
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─── ENUMS ────────────────────────────────────────────────────
+
+enum UserRole {
+  STUDENT_SELLER
+  STUDENT_BUYER
+  SUPPLIER
+  EXTERNAL_CLIENT
+  ADMIN
+}
+
+enum VerificationStatus {
+  PENDING
+  VERIFIED
+  REJECTED
+  SUSPENDED
+}
+
+enum OrderStatus {
+  PENDING
+  CONFIRMED
+  IN_PROGRESS
+  DISPATCHED
+  DELIVERED
+  DISPUTED
+  COMPLETED
+  CANCELLED
+  REFUNDED
+}
+
+enum EscrowStatus {
+  HELD
+  RELEASED
+  REFUNDED
+  DISPUTED
+}
+
+enum DisputeStatus {
+  OPEN
+  UNDER_REVIEW
+  RESOLVED_BUYER
+  RESOLVED_SELLER
+  ESCALATED
+}
+
+enum ProductType {
+  PHYSICAL
+  SERVICE
+  DIGITAL
+}
+
+enum SupplierTier {
+  CAMPUS
+  REGIONAL
+  NATIONAL
+}
+
+enum TransactionType {
+  SALE
+  PURCHASE
+  ESCROW_HOLD
+  ESCROW_RELEASE
+  SAVINGS_DEPOSIT
+  SAVINGS_WITHDRAWAL
+  PLATFORM_FEE
+  REFUND
+  CHAMA_CONTRIBUTION
+  CHAMA_PAYOUT
+}
+
+enum StrikeReason {
+  LATE_DELIVERY
+  WRONG_GOODS
+  PRICE_MANIPULATION
+  OFF_PLATFORM_TRANSACTION
+  VERIFIED_COMPLAINT
+  SPAM
+  SCAM_ATTEMPT
+}
+
+// ─── CORE USER ────────────────────────────────────────────────
+
+model User {
+  id                String             @id @default(cuid())
+  email             String             @unique
+  phone             String?            @unique
+  passwordHash      String
+  role              UserRole
+  verificationStatus VerificationStatus @default(PENDING)
+  isActive          Boolean            @default(true)
+  createdAt         DateTime           @default(now())
+  updatedAt         DateTime           @updatedAt
+
+  // Role-specific profiles (only one will be non-null)
+  studentProfile    StudentProfile?
+  supplierProfile   SupplierProfile?
+  externalProfile   ExternalClientProfile?
+  adminProfile      AdminProfile?
+
+  // Shared
+  sessions          Session[]
+  notifications     Notification[]
+  sentMessages      Message[]         @relation("SentMessages")
+  receivedMessages  Message[]         @relation("ReceivedMessages")
+
+  @@index([email])
+  @@index([role])
+}
+
+model Session {
+  id        String   @id @default(cuid())
+  userId    String
+  token     String   @unique
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+  user      User     @relation(fields: [userId], references: [id])
+}
+
+// ─── STUDENT PROFILE ──────────────────────────────────────────
+
+model StudentProfile {
+  id                 String   @id @default(cuid())
+  userId             String   @unique
+  user               User     @relation(fields: [userId], references: [id])
+
+  // Personal
+  fullName           String
+  profilePhoto       String?  // Cloudinary URL
+  idPhotoUrl         String?  // Stored securely for verification
+  idNumber           String   @unique
+  faceVerified       Boolean  @default(false)
+
+  // School
+  schoolId           String
+  school             School   @relation(fields: [schoolId], references: [id])
+  courseOfStudy      String?
+  yearOfStudy        Int?
+
+  // Mode
+  isSeller           Boolean  @default(false)
+  business           Business?
+
+  // Financial
+  walletBalance      Float    @default(0)
+  savingsBalance     Float    @default(0)
+  escrowBalance      Float    @default(0) // money held in escrow as buyer
+
+  // Activity
+  buyerOrders        Order[]  @relation("BuyerOrders")
+  reviews            Review[] @relation("ReviewsGiven")
+  receivedReviews    Review[] @relation("ReviewsReceived")
+  transactions       Transaction[]
+  chamaMembers       ChamaMember[]
+  wishlistItems      WishlistItem[]
+  savingsGoals       SavingsGoal[]
+
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+}
+
+// ─── SCHOOL ───────────────────────────────────────────────────
+
+model School {
+  id         String   @id @default(cuid())
+  name       String   @unique
+  shortName  String   // e.g. UoN, JKUAT, KMTC
+  type       String   // University / College / TVET / KMTC
+  county     String
+  town       String
+  logoUrl    String?
+  isActive   Boolean  @default(true)
+  students   StudentProfile[]
+  businesses Business[]
+  createdAt  DateTime @default(now())
+}
+
+// ─── BUSINESS (Student Storefront) ───────────────────────────
+
+model Business {
+  id               String   @id @default(cuid())
+  studentProfileId String   @unique
+  studentProfile   StudentProfile @relation(fields: [studentProfileId], references: [id])
+  schoolId         String
+  school           School   @relation(fields: [schoolId], references: [id])
+
+  // Identity
+  name             String
+  slug             String   @unique // used for comrade.co.ke/slug
+  tagline          String?
+  description      String?
+  logoUrl          String?
+  bannerUrl        String?
+  category         String   // Food / Design / Fashion / Tech / Beauty etc.
+
+  // Contact
+  whatsappNumber   String?
+  instagramHandle  String?
+  twitterHandle    String?
+
+  // Settings
+  isOpen           Boolean  @default(true)
+  acceptsDelivery  Boolean  @default(false)
+  deliveryAreas    String[] // campus zones or hostels served
+
+  // Stats (cached for performance)
+  totalSales       Float    @default(0)
+  totalOrders      Int      @default(0)
+  averageRating    Float    @default(0)
+  reviewCount      Int      @default(0)
+
+  // Relations
+  products         Product[]
+  orders           Order[]   @relation("SellerOrders")
+  reviews          Review[]  @relation("BusinessReviews")
+  promoCards       PromoCard[]
+  invoices         Invoice[]
+  milestones       BusinessMilestone[]
+
+  verificationBadge Boolean  @default(false)
+  isProAccount      Boolean  @default(false)
+  proExpiresAt      DateTime?
+
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  @@index([slug])
+  @@index([category])
+  @@index([schoolId])
+}
+
+// ─── PRODUCT / SERVICE ────────────────────────────────────────
+
+model Product {
+  id           String      @id @default(cuid())
+  businessId   String
+  business     Business    @relation(fields: [businessId], references: [id])
+
+  name         String
+  description  String
+  type         ProductType @default(PHYSICAL)
+  images       String[]    // Cloudinary URLs
+  price        Float
+  costPrice    Float?      // Private — for P&L only
+  stock        Int?        // null means unlimited (services)
+  lowStockAlert Int?       // trigger alert when stock hits this number
+  category     String
+  tags         String[]
+  isActive     Boolean     @default(true)
+  isFeatured   Boolean     @default(false)
+
+  // Service-specific
+  turnaroundDays  Int?
+  revisionsIncluded Int?
+  portfolioSamples String[] // Cloudinary URLs
+
+  orderItems   OrderItem[]
+  wishlistItems WishlistItem[]
+
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@index([businessId])
+  @@index([category])
+}
+
+// ─── ORDER & ESCROW ───────────────────────────────────────────
+
+model Order {
+  id              String      @id @default(cuid())
+  orderNumber     String      @unique @default(cuid()) // human-readable ref
+
+  // Parties
+  buyerProfileId  String
+  buyerProfile    StudentProfile @relation("BuyerOrders", fields: [buyerProfileId], references: [id])
+  businessId      String
+  business        Business    @relation("SellerOrders", fields: [businessId], references: [id])
+
+  // Items
+  items           OrderItem[]
+
+  // Financials
+  subtotal        Float
+  platformFee     Float       // percentage taken by platform
+  total           Float
+  escrowStatus    EscrowStatus @default(HELD)
+
+  // Status
+  status          OrderStatus  @default(PENDING)
+  deliveryMethod  String?      // pickup / delivery
+  deliveryAddress String?
+  deliveryNote    String?
+
+  // Timestamps
+  confirmedAt     DateTime?
+  dispatchedAt    DateTime?
+  deliveredAt     DateTime?
+  completedAt     DateTime?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  // Relations
+  dispute         Dispute?
+  review          Review?
+  invoice         Invoice?
+  transactions    Transaction[]
+
+  @@index([buyerProfileId])
+  @@index([businessId])
+  @@index([status])
+}
+
+model OrderItem {
+  id         String   @id @default(cuid())
+  orderId    String
+  order      Order    @relation(fields: [orderId], references: [id])
+  productId  String
+  product    Product  @relation(fields: [productId], references: [id])
+  quantity   Int
+  unitPrice  Float
+  subtotal   Float
+  note       String?
+}
+
+// ─── SUPPLIER ─────────────────────────────────────────────────
+
+model SupplierProfile {
+  id               String       @id @default(cuid())
+  userId           String       @unique
+  user             User         @relation(fields: [userId], references: [id])
+
+  // Business Details
+  businessName     String
+  businessRegNo    String?
+  kraPinNo         String?
+  physicalAddress  String
+  county           String
+  contactName      String
+  contactPhone     String
+  contactEmail     String
+  logoUrl          String?
+  description      String?
+  websiteUrl       String?
+
+  // Tier & Status
+  tier             SupplierTier @default(CAMPUS)
+  verificationStatus VerificationStatus @default(PENDING)
+  reliabilityScore Float        @default(100)
+
+  // Coverage
+  campusesCovered  String[]     // school IDs or "NATIONAL"
+
+  // Score breakdown (cached)
+  onTimeDeliveryRate    Float   @default(100)
+  orderAccuracyRate     Float   @default(100)
+  disputeRate           Float   @default(0)
+  avgRating             Float   @default(0)
+  avgResponseTimeHours  Float   @default(24)
+
+  // Financials
+  monthlyFee       Float        // based on tier
+  walletBalance    Float        @default(0)
+
+  // Relations
+  catalogue        SupplierProduct[]
+  orders           SupplierOrder[]
+  strikes          SupplierStrike[]
+  serviceBriefs    ServiceBrief[]
+  subscriptions    SupplierSubscription[]
+
+  activatedAt      DateTime?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+}
+
+model SupplierProduct {
+  id                  String   @id @default(cuid())
+  supplierProfileId   String
+  supplierProfile     SupplierProfile @relation(fields: [supplierProfileId], references: [id])
+
+  name                String
+  description         String
+  images              String[]
+  unitPrice           Float
+  minimumOrderQty     Int
+  bulkPricingTiers    Json?    // [{ minQty: 50, price: 45 }, ...]
+  deliveryLeadDays    Int
+  unit                String   // pieces / kg / litres / boxes
+  category            String
+  isActive            Boolean  @default(true)
+  priceLockUntil      DateTime // prices locked for 30 days after listing
+
+  orderItems          SupplierOrderItem[]
+
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+}
+
+model SupplierOrder {
+  id                String      @id @default(cuid())
+  orderNumber       String      @unique @default(cuid())
+  supplierProfileId String
+  supplierProfile   SupplierProfile @relation(fields: [supplierProfileId], references: [id])
+
+  // Can be individual or group order
+  isGroupOrder      Boolean     @default(false)
+  groupOrderId      String?
+  groupOrder        GroupOrder? @relation(fields: [groupOrderId], references: [id])
+
+  items             SupplierOrderItem[]
+  subtotal          Float
+  platformFee       Float
+  total             Float
+  escrowStatus      EscrowStatus @default(HELD)
+  status            OrderStatus  @default(PENDING)
+
+  buyerProfileId    String      // the student who placed/joined
+  deliveryAddress   String?
+  confirmedAt       DateTime?
+  dispatchedAt      DateTime?
+  deliveredAt       DateTime?
+  completedAt       DateTime?
+
+  dispute           SupplierDispute?
+  transactions      Transaction[]
+
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+}
+
+model SupplierOrderItem {
+  id                  String   @id @default(cuid())
+  supplierOrderId     String
+  supplierOrder       SupplierOrder @relation(fields: [supplierOrderId], references: [id])
+  supplierProductId   String
+  supplierProduct     SupplierProduct @relation(fields: [supplierProductId], references: [id])
+  quantity            Int
+  unitPrice           Float
+  subtotal            Float
+}
+
+model GroupOrder {
+  id                  String   @id @default(cuid())
+  supplierProductId   String
+  targetQuantity      Int
+  currentQuantity     Int      @default(0)
+  unitPrice           Float
+  status              String   @default("OPEN") // OPEN / FILLED / CANCELLED
+  expiresAt           DateTime
+  orders              SupplierOrder[]
+  createdAt           DateTime @default(now())
+}
+
+model SupplierStrike {
+  id                String      @id @default(cuid())
+  supplierProfileId String
+  supplierProfile   SupplierProfile @relation(fields: [supplierProfileId], references: [id])
+  reason            StrikeReason
+  description       String
+  issuedAt          DateTime @default(now())
+  adminId           String
+}
+
+model SupplierSubscription {
+  id                String   @id @default(cuid())
+  supplierProfileId String
+  supplierProfile   SupplierProfile @relation(fields: [supplierProfileId], references: [id])
+  tier              SupplierTier
+  monthlyFee        Float
+  startDate         DateTime
+  endDate           DateTime
+  isActive          Boolean  @default(true)
+  paymentReference  String?
+}
+
+// ─── EXTERNAL CLIENT ──────────────────────────────────────────
+
+model ExternalClientProfile {
+  id            String   @id @default(cuid())
+  userId        String   @unique
+  user          User     @relation(fields: [userId], references: [id])
+  companyName   String?
+  contactName   String
+  contactPhone  String
+  industry      String?
+  websiteUrl    String?
+  logoUrl       String?
+  walletBalance Float    @default(0)
+  briefs        ServiceBrief[]
+  createdAt     DateTime @default(now())
+}
+
+// ─── SERVICE MARKETPLACE (Supplier hires Student / External hires Student) ──
+
+model ServiceBrief {
+  id                    String   @id @default(cuid())
+  title                 String
+  description           String
+  budget                Float
+  deadline              DateTime
+  category              String   // Design / Writing / Photography / Dev / Marketing
+  attachments           String[]
+
+  // Posted by either supplier or external client
+  supplierProfileId     String?
+  supplierProfile       SupplierProfile? @relation(fields: [supplierProfileId], references: [id])
+  externalClientId      String?
+  externalClient        ExternalClientProfile? @relation(fields: [externalClientId], references: [id])
+
+  status                String   @default("OPEN") // OPEN / IN_REVIEW / AWARDED / COMPLETED
+  bids                  ServiceBid[]
+  awardedBidId          String?
+
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+}
+
+model ServiceBid {
+  id             String       @id @default(cuid())
+  briefId        String
+  brief          ServiceBrief @relation(fields: [briefId], references: [id])
+  bidderProfileId String
+  amount         Float
+  proposal       String
+  portfolioLinks String[]
+  isAwarded      Boolean      @default(false)
+  createdAt      DateTime @default(now())
+}
+
+// ─── FINANCIAL ────────────────────────────────────────────────
+
+model Transaction {
+  id               String          @id @default(cuid())
+  studentProfileId String?
+  studentProfile   StudentProfile? @relation(fields: [studentProfileId], references: [id])
+  orderId          String?
+  order            Order?          @relation(fields: [orderId], references: [id])
+  supplierOrderId  String?
+  supplierOrder    SupplierOrder?  @relation(fields: [supplierOrderId], references: [id])
+
+  type             TransactionType
+  amount           Float
+  balanceBefore    Float
+  balanceAfter     Float
+  reference        String          @unique
+  description      String
+  mpesaRef         String?
+  stripeRef        String?
+
+  createdAt        DateTime @default(now())
+
+  @@index([studentProfileId])
+  @@index([type])
+}
+
+model SavingsGoal {
+  id               String   @id @default(cuid())
+  studentProfileId String
+  studentProfile   StudentProfile @relation(fields: [studentProfileId], references: [id])
+  name             String
+  targetAmount     Float
+  currentAmount    Float    @default(0)
+  autoSavePercent  Float    @default(0) // auto-save X% of every sale
+  targetDate       DateTime?
+  isCompleted      Boolean  @default(false)
+  createdAt        DateTime @default(now())
+}
+
+model Chama {
+  id              String   @id @default(cuid())
+  name            String
+  description     String?
+  schoolId        String?
+  contributionAmt Float    // fixed contribution per cycle
+  cycleDays       Int      // e.g. 7 for weekly
+  currentCycle    Int      @default(1)
+  nextPayoutDate  DateTime
+  members         ChamaMember[]
+  payouts         ChamaPayout[]
+  createdAt       DateTime @default(now())
+}
+
+model ChamaMember {
+  id               String   @id @default(cuid())
+  chamaId          String
+  chama            Chama    @relation(fields: [chamaId], references: [id])
+  studentProfileId String
+  studentProfile   StudentProfile @relation(fields: [studentProfileId], references: [id])
+  payoutOrder      Int      // position in rotation
+  totalContributed Float    @default(0)
+  hasReceivedPayout Boolean @default(false)
+  joinedAt         DateTime @default(now())
+}
+
+model ChamaPayout {
+  id               String   @id @default(cuid())
+  chamaId          String
+  chama            Chama    @relation(fields: [chamaId], references: [id])
+  recipientId      String
+  amount           Float
+  cycle            Int
+  paidAt           DateTime @default(now())
+}
+
+// ─── DOCUMENTS ────────────────────────────────────────────────
+
+model Invoice {
+  id             String   @id @default(cuid())
+  invoiceNumber  String   @unique
+  businessId     String
+  business       Business @relation(fields: [businessId], references: [id])
+  orderId        String?  @unique
+  order          Order?   @relation(fields: [orderId], references: [id])
+  clientName     String
+  clientEmail    String?
+  clientPhone    String?
+  items          Json     // [{name, qty, unitPrice, subtotal}]
+  subtotal       Float
+  tax            Float    @default(0)
+  total          Float
+  dueDate        DateTime?
+  paidAt         DateTime?
+  pdfUrl         String?
+  createdAt      DateTime @default(now())
+}
+
+// ─── REVIEWS ──────────────────────────────────────────────────
+
+model Review {
+  id               String   @id @default(cuid())
+  orderId          String   @unique
+  order            Order    @relation(fields: [orderId], references: [id])
+  businessId       String
+  business         Business @relation("BusinessReviews", fields: [businessId], references: [id])
+  reviewerProfileId String
+  reviewerProfile  StudentProfile @relation("ReviewsGiven", fields: [reviewerProfileId], references: [id])
+  targetProfileId  String
+  targetProfile    StudentProfile @relation("ReviewsReceived", fields: [targetProfileId], references: [id])
+  rating           Int      // 1-5
+  comment          String?
+  isPublic         Boolean  @default(true)
+  createdAt        DateTime @default(now())
+}
+
+// ─── DISPUTES ─────────────────────────────────────────────────
+
+model Dispute {
+  id            String        @id @default(cuid())
+  orderId       String        @unique
+  order         Order         @relation(fields: [orderId], references: [id])
+  raisedById    String
+  reason        String
+  description   String
+  evidence      String[]      // Cloudinary URLs of photos/screenshots
+  status        DisputeStatus @default(OPEN)
+  resolution    String?
+  resolvedById  String?
+  resolvedAt    DateTime?
+  createdAt     DateTime @default(now())
+}
+
+model SupplierDispute {
+  id                String        @id @default(cuid())
+  supplierOrderId   String        @unique
+  supplierOrder     SupplierOrder @relation(fields: [supplierOrderId], references: [id])
+  raisedById        String
+  reason            String
+  description       String
+  evidence          String[]
+  status            DisputeStatus @default(OPEN)
+  resolution        String?
+  resolvedAt        DateTime?
+  createdAt         DateTime @default(now())
+}
+
+// ─── MARKETING ────────────────────────────────────────────────
+
+model PromoCard {
+  id            String   @id @default(cuid())
+  businessId    String
+  business      Business @relation(fields: [businessId], references: [id])
+  title         String
+  imageUrl      String
+  templateId    String
+  scheduledFor  DateTime?
+  publishedAt   DateTime?
+  type          String   // PRODUCT / FLASH_SALE / MILESTONE / GENERAL
+  createdAt     DateTime @default(now())
+}
+
+model BusinessMilestone {
+  id            String   @id @default(cuid())
+  businessId    String
+  business      Business @relation(fields: [businessId], references: [id])
+  type          String   // FIRST_SALE / REVENUE_10K / 3_MONTHS / 50_ORDERS etc.
+  value         String?
+  achievedAt    DateTime @default(now())
+  cardShared    Boolean  @default(false)
+}
+
+// ─── EDUCATION ────────────────────────────────────────────────
+
+model Lesson {
+  id            String   @id @default(cuid())
+  title         String
+  content       String   // Markdown
+  category      String   // Pricing / Marketing / Finance / Operations / Legal
+  stage         String   // BEGINNER / GROWING / SCALING
+  durationMins  Int
+  order         Int
+  isPublished   Boolean  @default(false)
+  progress      LessonProgress[]
+  createdAt     DateTime @default(now())
+}
+
+model LessonProgress {
+  id               String   @id @default(cuid())
+  lessonId         String
+  lesson           Lesson   @relation(fields: [lessonId], references: [id])
+  studentProfileId String
+  completedAt      DateTime @default(now())
+}
+
+model BusinessChallenge {
+  id          String   @id @default(cuid())
+  title       String
+  description String
+  metric      String   // REVENUE / ORDERS / NEW_CUSTOMERS
+  targetValue Float
+  startDate   DateTime
+  endDate     DateTime
+  schoolId    String?  // null = national challenge
+  entries     ChallengeEntry[]
+  createdAt   DateTime @default(now())
+}
+
+model ChallengeEntry {
+  id               String   @id @default(cuid())
+  challengeId      String
+  challenge        BusinessChallenge @relation(fields: [challengeId], references: [id])
+  studentProfileId String
+  currentValue     Float    @default(0)
+  rank             Int?
+  badgeAwarded     Boolean  @default(false)
+  createdAt        DateTime @default(now())
+}
+
+// ─── WISHLIST ─────────────────────────────────────────────────
+
+model WishlistItem {
+  id               String   @id @default(cuid())
+  studentProfileId String
+  studentProfile   StudentProfile @relation(fields: [studentProfileId], references: [id])
+  productId        String
+  product          Product  @relation(fields: [productId], references: [id])
+  createdAt        DateTime @default(now())
+}
+
+// ─── MESSAGING (In-platform only — no direct contact info shared) ──
+
+model Message {
+  id          String   @id @default(cuid())
+  senderId    String
+  sender      User     @relation("SentMessages", fields: [senderId], references: [id])
+  receiverId  String
+  receiver    User     @relation("ReceivedMessages", fields: [receiverId], references: [id])
+  content     String
+  orderId     String?  // linked to specific order/transaction context
+  isRead      Boolean  @default(false)
+  createdAt   DateTime @default(now())
+}
+
+// ─── NOTIFICATIONS ────────────────────────────────────────────
+
+model Notification {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id])
+  type      String   // ORDER_UPDATE / PAYMENT / DISPUTE / MILESTONE / CHALLENGE / SYSTEM
+  title     String
+  body      String
+  link      String?
+  isRead    Boolean  @default(false)
+  createdAt DateTime @default(now())
+}
+
+// ─── ADMIN ────────────────────────────────────────────────────
+
+model AdminProfile {
+  id        String   @id @default(cuid())
+  userId    String   @unique
+  user      User     @relation(fields: [userId], references: [id])
+  fullName  String
+  level     String   @default("MODERATOR") // MODERATOR / SUPER_ADMIN
+}

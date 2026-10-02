@@ -1,0 +1,417 @@
+// ─────────────────────────────────────────────────────────────
+// COMRADE MARKET — PHASE 1 SCHEMA (students only, one campus first)
+//
+// Money: ALWAYS whole Kenyan shillings stored as Int. Never Float.
+//        (M-Pesa moves whole shillings; floats cause rounding bugs.)
+//
+// Phase 2/3 models (suppliers, chama, savings, briefs, education...) live in
+// docs/schema.full-vision.prisma and are added back when their phase starts.
+// ─────────────────────────────────────────────────────────────
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─── ENUMS ────────────────────────────────────────────────────
+
+enum UserRole {
+  STUDENT
+  ADMIN
+}
+
+/// PENDING_REVIEW: can log in, cannot sell or buy until an admin approves the ID.
+enum AccountStatus {
+  PENDING_REVIEW
+  ACTIVE
+  REJECTED
+  SUSPENDED
+}
+
+enum SchoolType {
+  UNIVERSITY
+  COLLEGE
+  KMTC
+  TVET
+}
+
+enum ProductType {
+  PHYSICAL
+  SERVICE
+  DIGITAL
+}
+
+/// ESCROW: buyer pays the platform's payment provider up front, released on receipt.
+/// ON_DELIVERY: buyer pays the seller directly (cash / own M-Pesa). No fee, no protection.
+enum PaymentMode {
+  ESCROW
+  ON_DELIVERY
+}
+
+enum DeliveryMethod {
+  PICKUP
+  DELIVERY
+}
+
+enum OrderStatus {
+  PENDING_PAYMENT
+  PLACED
+  CONFIRMED
+  READY
+  DELIVERED
+  COMPLETED
+  DISPUTED
+  CANCELLED
+}
+
+enum EscrowStatus {
+  NONE
+  AWAITING_PAYMENT
+  HELD
+  RELEASED
+  REFUNDED
+}
+
+enum PaymentStatus {
+  PENDING
+  SUCCEEDED
+  FAILED
+}
+
+enum PayoutKind {
+  SELLER_PAYOUT
+  BUYER_REFUND
+}
+
+enum PayoutStatus {
+  PENDING
+  PROCESSING
+  SUCCEEDED
+  FAILED
+}
+
+enum DisputeStatus {
+  OPEN
+  RESOLVED_BUYER
+  RESOLVED_SELLER
+}
+
+// ─── USERS ────────────────────────────────────────────────────
+
+model User {
+  id               String        @id @default(cuid())
+  email            String        @unique
+  phone            String        @unique // normalised 2547XXXXXXXX
+  passwordHash     String
+  role             UserRole      @default(STUDENT)
+  status           AccountStatus @default(PENDING_REVIEW)
+  failedLoginCount Int           @default(0)
+  lockedUntil      DateTime?
+  createdAt        DateTime      @default(now())
+  updatedAt        DateTime      @updatedAt
+
+  studentProfile StudentProfile?
+  notifications  Notification[]
+
+  @@index([role, status])
+}
+
+model PhoneOtp {
+  id         String    @id @default(cuid())
+  phone      String
+  codeHash   String
+  attempts   Int       @default(0)
+  expiresAt  DateTime
+  consumedAt DateTime?
+  createdAt  DateTime  @default(now())
+
+  @@index([phone, createdAt])
+}
+
+model School {
+  id        String     @id @default(cuid())
+  name      String     @unique
+  shortName String
+  type      SchoolType
+  county    String
+  town      String
+  isActive  Boolean    @default(true)
+
+  students   StudentProfile[]
+  businesses Business[]
+}
+
+model StudentProfile {
+  id       String @id @default(cuid())
+  userId   String @unique
+  user     User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  fullName String
+
+  schoolId      String
+  school        School  @relation(fields: [schoolId], references: [id])
+  idNumber      String
+  courseOfStudy String?
+  yearOfStudy   Int?
+
+  // Verification. Files are PRIVATE storage keys, never public URLs.
+  idPhotoKey            String?
+  selfieKey             String?
+  verifiedAt            DateTime?
+  verificationExpiresAt DateTime? // students graduate: re-verify after this
+  reviewedById          String?
+  reviewNote            String?
+
+  business     Business?
+  buyerOrders  Order[]   @relation("BuyerOrders")
+  reviewsGiven Review[]
+  disputes     Dispute[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Student numbers are only unique within one institution.
+  @@unique([schoolId, idNumber])
+}
+
+// ─── STOREFRONT ───────────────────────────────────────────────
+
+model Business {
+  id      String         @id @default(cuid())
+  ownerId String         @unique // one business per student in Phase 1
+  owner   StudentProfile @relation(fields: [ownerId], references: [id])
+
+  schoolId String
+  school   School @relation(fields: [schoolId], references: [id])
+
+  name        String
+  slug        String  @unique
+  tagline     String?
+  description String?
+  category    String
+  logoUrl     String?
+  bannerUrl   String?
+
+  whatsappNumber  String? // normalised 2547XXXXXXXX
+  acceptsDelivery Boolean  @default(false)
+  deliveryAreas   String[]
+
+  isOpen   Boolean @default(true) // seller toggles: "I'm taking orders"
+  isActive Boolean @default(true) // admin toggles: visible on the platform
+
+  products Product[]
+  orders   Order[]
+  reviews  Review[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([schoolId, isActive])
+  @@index([category])
+}
+
+model Product {
+  id         String   @id @default(cuid())
+  businessId String
+  business   Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+
+  name          String
+  description   String
+  type          ProductType @default(PHYSICAL)
+  images        String[]
+  price         Int // KES
+  costPrice     Int? // KES, private
+  stock         Int? // null = unlimited (services)
+  lowStockAlert Int?
+  category      String?
+  isActive      Boolean     @default(true)
+
+  turnaroundDays Int? // services
+
+  orderItems OrderItem[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([businessId, isActive])
+}
+
+// ─── ORDERS, PAYMENTS, ESCROW ─────────────────────────────────
+
+model Order {
+  id          String @id @default(cuid())
+  orderNumber String @unique // human readable, e.g. CM-7K3P9Q
+
+  buyerId    String
+  buyer      StudentProfile @relation("BuyerOrders", fields: [buyerId], references: [id])
+  businessId String
+  business   Business       @relation(fields: [businessId], references: [id])
+
+  paymentMode  PaymentMode
+  status       OrderStatus  @default(PENDING_PAYMENT)
+  escrowStatus EscrowStatus @default(NONE)
+
+  subtotal     Int // KES sum of items
+  total        Int // KES buyer pays (== subtotal in Phase 1; fee comes out of seller side)
+  platformFee  Int // KES kept by platform (0 for ON_DELIVERY)
+  sellerPayout Int // KES total - platformFee
+
+  deliveryMethod  DeliveryMethod
+  deliveryAddress String?
+  buyerNote       String?
+  buyerPhone      String // M-Pesa number for the STK push
+
+  placedAt      DateTime?
+  confirmedAt   DateTime?
+  readyAt       DateTime?
+  deliveredAt   DateTime?
+  completedAt   DateTime?
+  cancelledAt   DateTime?
+  cancelReason  String?
+  autoReleaseAt DateTime? // set on DELIVERED; cron completes the order after this
+  expiresAt     DateTime? // PENDING_PAYMENT orders die here and free their stock
+
+  items    OrderItem[]
+  payments Payment[]
+  payouts  Payout[]
+  review   Review?
+  dispute  Dispute?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([buyerId, createdAt])
+  @@index([businessId, status])
+  @@index([status, autoReleaseAt])
+  @@index([status, expiresAt])
+}
+
+model OrderItem {
+  id        String  @id @default(cuid())
+  orderId   String
+  order     Order   @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  productId String
+  product   Product @relation(fields: [productId], references: [id])
+
+  // Snapshots: editing/deleting a product must never rewrite order history.
+  nameSnapshot String
+  unitPrice    Int
+  quantity     Int
+  lineTotal    Int
+}
+
+/// Money IN (buyer -> payment provider).
+model Payment {
+  id          String        @id @default(cuid())
+  orderId     String
+  order       Order         @relation(fields: [orderId], references: [id])
+  provider    String // "mock" | "intasend"
+  apiRef      String        @unique // our reference, sent to the provider
+  providerRef String?       @unique // provider's invoice id
+  amount      Int
+  phone       String
+  status      PaymentStatus @default(PENDING)
+  failReason  String?
+  paidAt      DateTime?
+  createdAt   DateTime      @default(now())
+
+  @@index([orderId])
+}
+
+/// Money OUT (platform -> seller, or platform -> buyer on refund).
+model Payout {
+  id          String       @id @default(cuid())
+  orderId     String
+  order       Order        @relation(fields: [orderId], references: [id])
+  kind        PayoutKind
+  phone       String // frozen at creation time
+  recipient   String // display name for the provider narrative
+  amount      Int
+  status      PayoutStatus @default(PENDING)
+  providerRef String?
+  attempts    Int          @default(0)
+  lastError   String?
+  createdAt   DateTime     @default(now())
+  completedAt DateTime?
+
+  // One seller payout and at most one refund per order. This is the
+  // database-level guarantee against paying an order out twice.
+  @@unique([orderId, kind])
+  @@index([status])
+}
+
+/// Every webhook we receive, keyed for idempotency (providers retry).
+model WebhookEvent {
+  id          String    @id @default(cuid())
+  provider    String
+  eventKey    String    @unique
+  payload     Json
+  receivedAt  DateTime  @default(now())
+  processedAt DateTime?
+}
+
+// ─── TRUST ────────────────────────────────────────────────────
+
+model Review {
+  id         String         @id @default(cuid())
+  orderId    String         @unique
+  order      Order          @relation(fields: [orderId], references: [id])
+  businessId String
+  business   Business       @relation(fields: [businessId], references: [id])
+  reviewerId String
+  reviewer   StudentProfile @relation(fields: [reviewerId], references: [id])
+  rating     Int // 1-5
+  comment    String?
+  createdAt  DateTime       @default(now())
+
+  @@index([businessId, createdAt])
+}
+
+model Dispute {
+  id           String         @id @default(cuid())
+  orderId      String         @unique
+  order        Order          @relation(fields: [orderId], references: [id])
+  raisedById   String
+  raisedBy     StudentProfile @relation(fields: [raisedById], references: [id])
+  reason       String
+  description  String
+  status       DisputeStatus  @default(OPEN)
+  resolution   String?
+  resolvedById String?
+  resolvedAt   DateTime?
+  createdAt    DateTime       @default(now())
+
+  @@index([status, createdAt])
+}
+
+// ─── PLATFORM ─────────────────────────────────────────────────
+
+model Notification {
+  id        String    @id @default(cuid())
+  userId    String
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type      String
+  title     String
+  body      String
+  link      String?
+  readAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([userId, readAt, createdAt])
+}
+
+model AuditLog {
+  id         String   @id @default(cuid())
+  actorId    String?
+  action     String
+  entityType String
+  entityId   String
+  metadata   Json?
+  createdAt  DateTime @default(now())
+
+  @@index([entityType, entityId])
+  @@index([actorId, createdAt])
+}

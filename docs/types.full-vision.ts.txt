@@ -1,0 +1,121 @@
+// src/types/index.ts
+// Central type exports — import from here, not from Prisma directly in components
+
+export type {
+  User,
+  StudentProfile,
+  SupplierProfile,
+  ExternalClientProfile,
+  Business,
+  Product,
+  Order,
+  OrderItem,
+  SupplierOrder,
+  SupplierProduct,
+  Review,
+  Dispute,
+  Transaction,
+  SavingsGoal,
+  Chama,
+  Invoice,
+  School,
+  ServiceBrief,
+  ServiceBid,
+  Lesson,
+  BusinessChallenge,
+  Notification,
+} from "@prisma/client";
+
+export type {
+  UserRole,
+  VerificationStatus,
+  OrderStatus,
+  EscrowStatus,
+  ProductType,
+  SupplierTier,
+  TransactionType,
+} from "@prisma/client";
+
+// ─── App-level types (not in DB) ────────────────────────────
+
+export interface ApiResponse<T = unknown> {
+  success: boolean;
+  data?: T;
+  error?: string;
+  message?: string;
+}
+
+export interface PaginatedResponse<T> {
+  items: T[];
+  total: number;
+  page: number;
+  pageSize: number;
+  hasMore: boolean;
+}
+
+export interface DashboardStats {
+  totalRevenue: number;
+  totalOrders: number;
+  pendingOrders: number;
+  averageRating: number;
+  weeklyRevenue: number;
+  monthlyRevenue: number;
+  profitMargin: number;
+  newCustomers: number;
+}
+
+export interface ReliabilityScoreBreakdown {
+  overall: number;
+  onTimeDelivery: number;
+  orderAccuracy: number;
+  disputeRate: number;
+  avgRating: number;
+  responseTime: number;
+}
+
+export interface EscrowSummary {
+  heldAmount: number;
+  pendingRelease: number;
+  totalReleased: number;
+}
+
+export interface PLStatement {
+  period: string;
+  revenue: number;
+  costOfGoods: number;
+  grossProfit: number;
+  expenses: number;
+  netProfit: number;
+  profitMargin: number;
+}
+
+export interface PromoCardTemplate {
+  id: string;
+  name: string;
+  previewUrl: string;
+  category: "PRODUCT" | "FLASH_SALE" | "MILESTONE" | "GENERAL";
+}
+
+export interface VerificationStep {
+  step: "ID_UPLOAD" | "FACE_MATCH" | "SCHOOL_MATCH" | "MANUAL_REVIEW";
+  status: "PENDING" | "PASSED" | "FAILED";
+  message?: string;
+}
+
+export interface CartItem {
+  productId: string;
+  businessId: string;
+  name: string;
+  price: number;
+  quantity: number;
+  imageUrl?: string;
+}
+
+export interface BusinessPageProps {
+  business: Business & {
+    products: Product[];
+    studentProfile: StudentProfile & { school: School };
+    reviews: Review[];
+    _count: { orders: number };
+  };
+}
